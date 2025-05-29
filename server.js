@@ -1,8 +1,9 @@
-const express = require('express');
-const multer = require('multer');
-const editly = require('editly');
-const { v4: uuidv4 } = require('uuid');
-const fs = require('fs');
+import express from 'express';
+import multer from 'multer';
+import editly from 'editly';
+import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+
 const app = express();
 const port = process.env.PORT || 3000;
 
