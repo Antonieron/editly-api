@@ -1,19 +1,25 @@
 FROM node:18
 
-# Установка зависимостей сборки (для editly и gl)
+# Установка системных зависимостей для gl и editly
 RUN apt-get update && apt-get install -y \
-  libxi-dev libx11-dev libxext-dev pkg-config python3 make g++ \
-  && ln -sf /usr/bin/python3 /usr/bin/python \
-  && apt-get clean
+  libx11-dev \
+  libxi-dev \
+  libgl1-mesa-dev \
+  libgl1-mesa-glx \
+  libxext-dev \
+  pkg-config \
+  python3 \
+  make \
+  g++ \
+  && ln -s /usr/bin/python3 /usr/bin/python
 
 WORKDIR /app
 
 COPY package*.json ./
 
-# Устанавливаем зависимости с поддержкой старых peer deps
+# Устанавливаем зависимости отдельно, чтобы использовать кеш, и с legacy-peer-deps
 RUN npm install --legacy-peer-deps
 
-# Копируем остальной код
 COPY . .
 
 CMD ["npm", "start"]
