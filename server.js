@@ -1,10 +1,10 @@
 import express from 'express';
 import multer from 'multer';
+import editly from 'editly';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
-import fetch from 'node-fetch';
-import ffmpeg from 'fluent-ffmpeg'; // npm install fluent-ffmpeg
+import fetch from 'node-fetch'; // Make sure to install: npm install node-fetch
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,117 +25,6 @@ const ensureDirectories = async () => {
 };
 
 const upload = multer({ dest: 'uploads/' });
-
-// Function to create video using FFmpeg
-async function createVideoWithFFmpeg(clips, outputPath) {
-  return new Promise((resolve, reject) => {
-    // Create a temporary file list for FFmpeg
-    const fileListPath = `uploads/filelist_${Date.now()}.txt`;
-    
-    // Generate file list content
-    const fileListContent = clips.map(clip => {
-      const imagePath = clip.layers[0].path;
-      return `file '${path.resolve(imagePath)}'
-duration 3`;
-    }).join('\n') + '\nfile \'' + path.resolve(clips[clips.length - 1].layers[0].path) + '\'';
-    
-    // Write file list
-    fs.writeFile(fileListPath, fileListContent)
-      .then(() => {
-        // Use FFmpeg to create video
-        ffmpeg()
-          .input(fileListPath)
-          .inputOptions(['-f', 'concat', '-safe', '0'])
-          .outputOptions([
-            '-c:v', 'libx264',
-            '-r', '30',
-            '-pix_fmt', 'yuv420p',
-            '-vf', 'scale=1280:720'
-          ])
-          .output(outputPath)
-          .on('start', (commandLine) => {
-            console.log('FFmpeg command:', commandLine);
-          })
-          .on('progress', (progress) => {
-            console.log('Processing: ' + progress.percent + '% done');
-          })
-          .on('end', async () => {
-            console.log('FFmpeg processing finished');
-            // Cleanup file list
-            try {
-              await fs.unlink(fileListPath);
-            } catch (e) {
-              console.error('Error cleaning up file list:', e);
-            }
-            resolve();
-          })
-          .on('error', async (err) => {
-            console.error('FFmpeg error:', err);
-            // Cleanup file list
-            try {
-              await fs.unlink(fileListPath);
-            } catch (e) {
-              console.error('Error cleaning up file list:', e);
-            }
-            reject(err);
-          })
-          .run();
-      })
-      .catch(reject);
-  });
-}
-
-// Helper function to create a simple fallback image
-async function createFallbackImage(jobId, index) {
-  try {
-    // Create a simple SVG as fallback
-    const svgContent = `
-      <svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
-        <rect width="1280" height="720" fill="#${Math.floor(Math.random()*16777215).toString(16)}"/>
-        <text x="640" y="360" font-family="Arial" font-size="48" fill="white" text-anchor="middle" dy=".3em">
-          Slide ${index + 1}
-        </text>
-      </svg>
-    `;
-    
-    const fallbackPath = path.resolve('uploads', `${jobId}_fallback_${index}.svg`);
-    await fs.writeFile(fallbackPath, svgContent);
-    console.log(`Created fallback image: ${fallbackPath}`);
-    return fallbackPath;
-  } catch (error) {
-    console.error('Error creating fallback image:', error);
-    // If even SVG creation fails, return null and let editly handle it
-    return null;
-  }
-}
-
-// Helper function to download remote images
-async function downloadImage(url, filepath) {
-  try {
-    console.log(`Downloading image from: ${url}`);
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
-    }
-    
-    const buffer = await response.buffer();
-    await fs.writeFile(filepath, buffer);
-    
-    // Verify file was created and has content
-    const stats = await fs.stat(filepath);
-    console.log(`Image saved to: ${filepath}, size: ${stats.size} bytes`);
-    
-    if (stats.size === 0) {
-      throw new Error(`Downloaded file is empty: ${filepath}`);
-    }
-    
-    return filepath;
-  } catch (error) {
-    console.error(`Error downloading image ${url}:`, error);
-    throw error;
-  }
-}
 
 app.get('/', (req, res) => {
   res.json({ 
@@ -184,8 +73,6 @@ app.post('/register-job', async (req, res) => {
 
 // === Background job processor ===
 async function processVideoJob(jobId) {
-  const downloadedFiles = []; // Track downloaded files for cleanup
-  
   try {
     const job = pendingJobs.get(jobId);
     if (!job) {
@@ -208,85 +95,34 @@ async function processVideoJob(jobId) {
       ];
     }
 
-    // Download all remote images first
-    console.log('Downloading remote images...');
-    const clips = [];
-    
-    for (let i = 0; i < videoData.length; i++) {
-      const item = videoData[i];
-      let imagePath = item.image_url;
-      
-      // Check if it's a remote URL
-      if (item.image_url && item.image_url.startsWith('http')) {
-        try {
-          // Create unique filename with absolute path
-          const extension = path.extname(new URL(item.image_url).pathname) || '.jpg';
-          const localPath = path.resolve('uploads', `${jobId}_${i}${extension}`);
-          
-          console.log(`Processing image ${i}: ${item.image_url}`);
-          console.log(`Will save to: ${localPath}`);
-          
-          // Download the image
-          imagePath = await downloadImage(item.image_url, localPath);
-          downloadedFiles.push(localPath); // Track for cleanup
-          
-          // Double-check file exists
-          const fileExists = await fs.access(imagePath).then(() => true).catch(() => false);
-          if (!fileExists) {
-            throw new Error(`File was not created: ${imagePath}`);
-          }
-          
-          console.log(`✅ Image ${i} ready: ${imagePath}`);
-        } catch (downloadError) {
-          console.error(`❌ Failed to download image ${i}:`, downloadError);
-          
-          // Create a simple colored rectangle as fallback
-          imagePath = await createFallbackImage(jobId, i);
-          downloadedFiles.push(imagePath);
-        }
-      } else if (imagePath) {
-        // Check if local file exists
-        const fileExists = await fs.access(imagePath).then(() => true).catch(() => false);
-        if (!fileExists) {
-          console.error(`❌ Local file doesn't exist: ${imagePath}`);
-          imagePath = await createFallbackImage(jobId, i);
-          downloadedFiles.push(imagePath);
-        }
-      } else {
-        // No image provided, create fallback
-        imagePath = await createFallbackImage(jobId, i);
-        downloadedFiles.push(imagePath);
-      }
-      
-      clips.push({
+    // Create editly spec
+    const editlySpec = {
+      width: 1280,
+      height: 768,
+      fps: 30,
+      clips: videoData.map((item, index) => ({
         duration: 3,
         layers: [
           {
             type: 'image',
-            path: imagePath
+            path: item.image_url || `https://via.placeholder.com/1280x720?text=Slide+${index + 1}`
           }
         ]
-      });
-    }
+      })),
+      outPath: `output/${jobId}.mp4`
+    };
 
-    // Create video using FFmpeg instead of editly
-    const outputPath = `output/${jobId}.mp4`;
+    console.log('Generating video with spec:', JSON.stringify(editlySpec, null, 2));
     
-    console.log('Creating video with FFmpeg...');
-    console.log(`Images to process: ${clips.length}`);
-    
-    await createVideoWithFFmpeg(clips, outputPath);
+    await editly(editlySpec);
     
     job.status = 'completed';
-    job.videoPath = outputPath;
+    job.videoPath = editlySpec.outPath;
     
-    console.log(`Video generated successfully: ${outputPath}`);
+    console.log(`Video generated successfully: ${editlySpec.outPath}`);
     
     // Send result back to n8n
-    await notifyN8n(job, outputPath);
-    
-    // Cleanup downloaded images
-    await cleanupFiles(downloadedFiles);
+    await notifyN8n(job, editlySpec.outPath);
     
   } catch (error) {
     console.error(`Job ${jobId} failed:`, error);
@@ -297,21 +133,6 @@ async function processVideoJob(jobId) {
       
       // Still notify n8n about the failure
       await notifyN8n(job, null, error);
-    }
-    
-    // Cleanup downloaded images even on error
-    await cleanupFiles(downloadedFiles);
-  }
-}
-
-// Helper function to cleanup files
-async function cleanupFiles(filePaths) {
-  for (const filePath of filePaths) {
-    try {
-      await fs.unlink(filePath);
-      console.log(`Cleaned up downloaded file: ${filePath}`);
-    } catch (cleanupError) {
-      console.error(`Error cleaning up file ${filePath}:`, cleanupError);
     }
   }
 }
