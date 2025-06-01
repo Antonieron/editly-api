@@ -26,6 +26,30 @@ const ensureDirectories = async () => {
 
 const upload = multer({ dest: 'uploads/' });
 
+// Helper function to create a simple fallback image
+async function createFallbackImage(jobId, index) {
+  try {
+    // Create a simple SVG as fallback
+    const svgContent = `
+      <svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
+        <rect width="1280" height="720" fill="#${Math.floor(Math.random()*16777215).toString(16)}"/>
+        <text x="640" y="360" font-family="Arial" font-size="48" fill="white" text-anchor="middle" dy=".3em">
+          Slide ${index + 1}
+        </text>
+      </svg>
+    `;
+    
+    const fallbackPath = path.resolve('uploads', `${jobId}_fallback_${index}.svg`);
+    await fs.writeFile(fallbackPath, svgContent);
+    console.log(`Created fallback image: ${fallbackPath}`);
+    return fallbackPath;
+  } catch (error) {
+    console.error('Error creating fallback image:', error);
+    // If even SVG creation fails, return null and let editly handle it
+    return null;
+  }
+}
+
 // Helper function to download remote images
 async function downloadImage(url, filepath) {
   try {
@@ -38,7 +62,15 @@ async function downloadImage(url, filepath) {
     
     const buffer = await response.buffer();
     await fs.writeFile(filepath, buffer);
-    console.log(`Image saved to: ${filepath}`);
+    
+    // Verify file was created and has content
+    const stats = await fs.stat(filepath);
+    console.log(`Image saved to: ${filepath}, size: ${stats.size} bytes`);
+    
+    if (stats.size === 0) {
+      throw new Error(`Downloaded file is empty: ${filepath}`);
+    }
+    
     return filepath;
   } catch (error) {
     console.error(`Error downloading image ${url}:`, error);
@@ -128,18 +160,43 @@ async function processVideoJob(jobId) {
       // Check if it's a remote URL
       if (item.image_url && item.image_url.startsWith('http')) {
         try {
-          // Create unique filename
-          const extension = path.extname(item.image_url) || '.jpg';
-          const localPath = path.join('uploads', `${jobId}_${i}${extension}`);
+          // Create unique filename with absolute path
+          const extension = path.extname(new URL(item.image_url).pathname) || '.jpg';
+          const localPath = path.resolve('uploads', `${jobId}_${i}${extension}`);
+          
+          console.log(`Processing image ${i}: ${item.image_url}`);
+          console.log(`Will save to: ${localPath}`);
           
           // Download the image
           imagePath = await downloadImage(item.image_url, localPath);
           downloadedFiles.push(localPath); // Track for cleanup
+          
+          // Double-check file exists
+          const fileExists = await fs.access(imagePath).then(() => true).catch(() => false);
+          if (!fileExists) {
+            throw new Error(`File was not created: ${imagePath}`);
+          }
+          
+          console.log(`✅ Image ${i} ready: ${imagePath}`);
         } catch (downloadError) {
-          console.error(`Failed to download image ${i}:`, downloadError);
-          // Use a fallback placeholder
-          imagePath = `https://via.placeholder.com/1280x720?text=Image+${i + 1}+Error`;
+          console.error(`❌ Failed to download image ${i}:`, downloadError);
+          
+          // Create a simple colored rectangle as fallback
+          imagePath = await createFallbackImage(jobId, i);
+          downloadedFiles.push(imagePath);
         }
+      } else if (imagePath) {
+        // Check if local file exists
+        const fileExists = await fs.access(imagePath).then(() => true).catch(() => false);
+        if (!fileExists) {
+          console.error(`❌ Local file doesn't exist: ${imagePath}`);
+          imagePath = await createFallbackImage(jobId, i);
+          downloadedFiles.push(imagePath);
+        }
+      } else {
+        // No image provided, create fallback
+        imagePath = await createFallbackImage(jobId, i);
+        downloadedFiles.push(imagePath);
       }
       
       clips.push({
