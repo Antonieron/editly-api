@@ -1,253 +1,147 @@
+// Editly API Server for Image-to-Video Jobs
 import express from 'express';
 import multer from 'multer';
 import editly from 'editly';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
-import fetch from 'node-fetch'; // Make sure to install: npm install node-fetch
+import fetch from 'node-fetch';
 
 const app = express();
 const port = process.env.PORT || 3000;
 
-// Store for pending jobs
 const pendingJobs = new Map();
 
 app.use(express.json({ limit: '10mb' }));
 
 const ensureDirectories = async () => {
-  try {
-    await fs.mkdir('uploads', { recursive: true });
-    await fs.mkdir('output', { recursive: true });
-    console.log('Directories created successfully');
-  } catch (error) {
-    console.error('Error creating directories:', error);
-  }
+  await fs.mkdir('uploads', { recursive: true });
+  await fs.mkdir('output', { recursive: true });
 };
 
 const upload = multer({ dest: 'uploads/' });
 
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'running', 
+  res.json({
+    status: 'running',
     message: 'Editly API is working',
-    endpoints: ['/generate', '/generate-json', '/process-video', '/check-job']
+    endpoints: ['/register-job', '/check-job/:jobId']
   });
 });
 
-// === NEW: Endpoint for n8n to register a video processing job ===
 app.post('/register-job', async (req, res) => {
   try {
     const { youtubeUrl, webhookUrl, supabaseData } = req.body;
-    
-    if (!youtubeUrl || !webhookUrl) {
-      return res.status(400).json({ error: 'Missing youtubeUrl or webhookUrl' });
-    }
+    if (!webhookUrl) return res.status(400).json({ error: 'Missing webhookUrl' });
 
     const jobId = uuidv4();
-    
-    // Store job details
-    pendingJobs.set(jobId, {
-      youtubeUrl,
+
+    const job = {
+      jobId,
+      youtubeUrl: youtubeUrl || 'n/a',
       webhookUrl,
       supabaseData: supabaseData || [],
       status: 'registered',
       createdAt: new Date()
-    });
-
-    console.log(`Job registered: ${jobId} for URL: ${youtubeUrl}`);
-    
-    // Start processing in background
-    processVideoJob(jobId);
-    
-    res.json({ 
-      success: true, 
-      jobId,
-      message: 'Job registered and processing started'
-    });
-    
-  } catch (error) {
-    console.error('Register job error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// === Background job processor ===
-async function processVideoJob(jobId) {
-  try {
-    const job = pendingJobs.get(jobId);
-    if (!job) {
-      console.error(`Job ${jobId} not found`);
-      return;
-    }
-
-    job.status = 'processing';
-    console.log(`Processing job ${jobId}...`);
-
-    // If we have supabase data, use it directly
-    let videoData = job.supabaseData;
-    
-    // If no supabase data, you could fetch it here
-    if (!videoData || videoData.length === 0) {
-      console.log('No supabase data provided, using placeholder');
-      videoData = [
-        { image_url: 'https://via.placeholder.com/1280x720/ff0000/ffffff?text=Slide+1' },
-        { image_url: 'https://via.placeholder.com/1280x720/00ff00/ffffff?text=Slide+2' }
-      ];
-    }
-
-    // Create editly spec
-    const editlySpec = {
-      width: 1280,
-      height: 768,
-      fps: 30,
-      clips: videoData.map((item, index) => ({
-        duration: 3,
-        layers: [
-          {
-            type: 'image',
-            path: item.image_url || `https://via.placeholder.com/1280x720?text=Slide+${index + 1}`
-          }
-        ]
-      })),
-      outPath: `output/${jobId}.mp4`
     };
 
-    console.log('Generating video with spec:', JSON.stringify(editlySpec, null, 2));
-    
+    pendingJobs.set(jobId, job);
+    processVideoJob(jobId);
+
+    res.json({ success: true, jobId, message: 'Job registered and started' });
+  } catch (err) {
+    console.error('Register job error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+async function processVideoJob(jobId) {
+  const job = pendingJobs.get(jobId);
+  if (!job) return;
+  job.status = 'processing';
+
+  let videoData = job.supabaseData;
+  if (!videoData || !videoData.length) {
+    videoData = [
+      { image_url: 'https://via.placeholder.com/1280x720/ff0000/ffffff?text=Slide+1' },
+      { image_url: 'https://via.placeholder.com/1280x720/00ff00/ffffff?text=Slide+2' }
+    ];
+  }
+
+  const outPath = `output/${jobId}.mp4`;
+  const editlySpec = {
+    width: 1280,
+    height: 720,
+    fps: 30,
+    outPath,
+    clips: videoData.map((item, i) => ({
+      duration: 3,
+      layers: [{ type: 'image', path: item.image_url }]
+    }))
+  };
+
+  try {
     await editly(editlySpec);
-    
     job.status = 'completed';
-    job.videoPath = editlySpec.outPath;
-    
-    console.log(`Video generated successfully: ${editlySpec.outPath}`);
-    
-    // Send result back to n8n
-    await notifyN8n(job, editlySpec.outPath);
-    
-  } catch (error) {
-    console.error(`Job ${jobId} failed:`, error);
-    const job = pendingJobs.get(jobId);
-    if (job) {
-      job.status = 'failed';
-      job.error = error.message;
-      
-      // Still notify n8n about the failure
-      await notifyN8n(job, null, error);
-    }
+    job.videoPath = outPath;
+    await notifyN8n(job, outPath);
+    await fs.unlink(outPath).catch(() => {});
+  } catch (err) {
+    console.error(`Error processing job ${jobId}:`, err);
+    job.status = 'failed';
+    job.error = err.message;
+    await notifyN8n(job, null, err);
   }
 }
 
-// === Notify n8n webhook ===
 async function notifyN8n(job, videoPath, error = null) {
-  try {
-    let payload;
-    
-    if (error) {
-      payload = {
-        success: false,
-        jobId: job.jobId,
-        error: error.message,
-        status: 'failed'
-      };
-    } else {
-      // Read video file and convert to base64
-      const videoBuffer = await fs.readFile(videoPath);
-      const videoBase64 = videoBuffer.toString('base64');
-      
-      payload = {
-        success: true,
-        jobId: job.jobId,
-        status: 'completed',
-        videoBase64,
-        videoSize: videoBuffer.length,
-        videoPath: path.basename(videoPath)
-      };
-    }
+  const payload = error ? {
+    success: false,
+    jobId: job.jobId,
+    status: 'failed',
+    error: error.message
+  } : {
+    success: true,
+    jobId: job.jobId,
+    status: 'completed',
+    videoBase64: (await fs.readFile(videoPath)).toString('base64'),
+    videoPath: path.basename(videoPath)
+  };
 
-    console.log(`Notifying n8n webhook: ${job.webhookUrl}`);
-    
+  try {
     const response = await fetch(job.webhookUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
-
-    if (response.ok) {
-      console.log('Successfully notified n8n');
-      
-      // Cleanup video file after successful notification
-      if (videoPath) {
-        try {
-          await fs.unlink(videoPath);
-          console.log(`Cleaned up video file: ${videoPath}`);
-        } catch (cleanupError) {
-          console.error('Cleanup error:', cleanupError);
-        }
-      }
-    } else {
-      console.error('Failed to notify n8n:', response.status, response.statusText);
-    }
-    
-  } catch (notifyError) {
-    console.error('Error notifying n8n:', notifyError);
+    if (!response.ok) console.error('n8n webhook failed:', response.status);
+  } catch (err) {
+    console.error('Webhook error:', err);
   }
 }
 
-// === Job status endpoint ===
 app.get('/check-job/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  const job = pendingJobs.get(jobId);
-  
-  if (!job) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-  
-  res.json({
-    jobId,
-    status: job.status,
-    createdAt: job.createdAt,
-    error: job.error || null
-  });
+  const job = pendingJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json(job);
 });
 
-// === Keep your existing endpoints ===
-app.post('/generate', upload.single('image'), async (req, res) => {
-  // ... your existing generate code
-});
-
-app.post('/generate-json', async (req, res) => {
-  // ... your existing generate-json code
-});
-
-// Cleanup old jobs periodically
 setInterval(() => {
-  const now = new Date();
+  const now = Date.now();
   for (const [jobId, job] of pendingJobs.entries()) {
-    const ageMinutes = (now - job.createdAt) / (1000 * 60);
-    if (ageMinutes > 30) { // Remove jobs older than 30 minutes
+    if ((now - new Date(job.createdAt).getTime()) > 30 * 60 * 1000) {
       pendingJobs.delete(jobId);
-      console.log(`Cleaned up old job: ${jobId}`);
     }
   }
-}, 5 * 60 * 1000); // Run every 5 minutes
+}, 5 * 60 * 1000);
 
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error', 
-    message: err.message 
-  });
+  res.status(500).json({ error: 'Internal server error', message: err.message });
 });
 
-const startServer = async () => {
-  await ensureDirectories();
-  
+ensureDirectories().then(() => {
   app.listen(port, '0.0.0.0', () => {
-    console.log(`Editly API server running on port ${port}`);
-    console.log(`Health check: http://localhost:${port}/`);
+    console.log(`Editly API running at http://localhost:${port}/`);
   });
-};
-
-startServer().catch(console.error);
+});
