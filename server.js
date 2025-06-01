@@ -26,6 +26,26 @@ const ensureDirectories = async () => {
 
 const upload = multer({ dest: 'uploads/' });
 
+// Helper function to download remote images
+async function downloadImage(url, filepath) {
+  try {
+    console.log(`Downloading image from: ${url}`);
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+    }
+    
+    const buffer = await response.buffer();
+    await fs.writeFile(filepath, buffer);
+    console.log(`Image saved to: ${filepath}`);
+    return filepath;
+  } catch (error) {
+    console.error(`Error downloading image ${url}:`, error);
+    throw error;
+  }
+}
+
 app.get('/', (req, res) => {
   res.json({ 
     status: 'running', 
@@ -73,6 +93,8 @@ app.post('/register-job', async (req, res) => {
 
 // === Background job processor ===
 async function processVideoJob(jobId) {
+  const downloadedFiles = []; // Track downloaded files for cleanup
+  
   try {
     const job = pendingJobs.get(jobId);
     if (!job) {
@@ -95,20 +117,48 @@ async function processVideoJob(jobId) {
       ];
     }
 
-    // Create editly spec
-    const editlySpec = {
-      width: 1280,
-      height: 768,
-      fps: 30,
-      clips: videoData.map((item, index) => ({
+    // Download all remote images first
+    console.log('Downloading remote images...');
+    const clips = [];
+    
+    for (let i = 0; i < videoData.length; i++) {
+      const item = videoData[i];
+      let imagePath = item.image_url;
+      
+      // Check if it's a remote URL
+      if (item.image_url && item.image_url.startsWith('http')) {
+        try {
+          // Create unique filename
+          const extension = path.extname(item.image_url) || '.jpg';
+          const localPath = path.join('uploads', `${jobId}_${i}${extension}`);
+          
+          // Download the image
+          imagePath = await downloadImage(item.image_url, localPath);
+          downloadedFiles.push(localPath); // Track for cleanup
+        } catch (downloadError) {
+          console.error(`Failed to download image ${i}:`, downloadError);
+          // Use a fallback placeholder
+          imagePath = `https://via.placeholder.com/1280x720?text=Image+${i + 1}+Error`;
+        }
+      }
+      
+      clips.push({
         duration: 3,
         layers: [
           {
             type: 'image',
-            path: item.image_url || `https://via.placeholder.com/1280x720?text=Slide+${index + 1}`
+            path: imagePath
           }
         ]
-      })),
+      });
+    }
+
+    // Create editly spec with local image paths
+    const editlySpec = {
+      width: 1280,
+      height: 768,
+      fps: 30,
+      clips: clips,
       outPath: `output/${jobId}.mp4`
     };
 
@@ -124,6 +174,9 @@ async function processVideoJob(jobId) {
     // Send result back to n8n
     await notifyN8n(job, editlySpec.outPath);
     
+    // Cleanup downloaded images
+    await cleanupFiles(downloadedFiles);
+    
   } catch (error) {
     console.error(`Job ${jobId} failed:`, error);
     const job = pendingJobs.get(jobId);
@@ -133,6 +186,21 @@ async function processVideoJob(jobId) {
       
       // Still notify n8n about the failure
       await notifyN8n(job, null, error);
+    }
+    
+    // Cleanup downloaded images even on error
+    await cleanupFiles(downloadedFiles);
+  }
+}
+
+// Helper function to cleanup files
+async function cleanupFiles(filePaths) {
+  for (const filePath of filePaths) {
+    try {
+      await fs.unlink(filePath);
+      console.log(`Cleaned up downloaded file: ${filePath}`);
+    } catch (cleanupError) {
+      console.error(`Error cleaning up file ${filePath}:`, cleanupError);
     }
   }
 }
