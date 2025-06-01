@@ -1,10 +1,10 @@
 import express from 'express';
 import multer from 'multer';
-import editly from 'editly';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
-import fetch from 'node-fetch'; // Make sure to install: npm install node-fetch
+import fetch from 'node-fetch';
+import ffmpeg from 'fluent-ffmpeg'; // npm install fluent-ffmpeg
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -25,6 +25,65 @@ const ensureDirectories = async () => {
 };
 
 const upload = multer({ dest: 'uploads/' });
+
+// Function to create video using FFmpeg
+async function createVideoWithFFmpeg(clips, outputPath) {
+  return new Promise((resolve, reject) => {
+    // Create a temporary file list for FFmpeg
+    const fileListPath = `uploads/filelist_${Date.now()}.txt`;
+    
+    // Generate file list content
+    const fileListContent = clips.map(clip => {
+      const imagePath = clip.layers[0].path;
+      return `file '${path.resolve(imagePath)}'
+duration 3`;
+    }).join('\n') + '\nfile \'' + path.resolve(clips[clips.length - 1].layers[0].path) + '\'';
+    
+    // Write file list
+    fs.writeFile(fileListPath, fileListContent)
+      .then(() => {
+        // Use FFmpeg to create video
+        ffmpeg()
+          .input(fileListPath)
+          .inputOptions(['-f', 'concat', '-safe', '0'])
+          .outputOptions([
+            '-c:v', 'libx264',
+            '-r', '30',
+            '-pix_fmt', 'yuv420p',
+            '-vf', 'scale=1280:720'
+          ])
+          .output(outputPath)
+          .on('start', (commandLine) => {
+            console.log('FFmpeg command:', commandLine);
+          })
+          .on('progress', (progress) => {
+            console.log('Processing: ' + progress.percent + '% done');
+          })
+          .on('end', async () => {
+            console.log('FFmpeg processing finished');
+            // Cleanup file list
+            try {
+              await fs.unlink(fileListPath);
+            } catch (e) {
+              console.error('Error cleaning up file list:', e);
+            }
+            resolve();
+          })
+          .on('error', async (err) => {
+            console.error('FFmpeg error:', err);
+            // Cleanup file list
+            try {
+              await fs.unlink(fileListPath);
+            } catch (e) {
+              console.error('Error cleaning up file list:', e);
+            }
+            reject(err);
+          })
+          .run();
+      })
+      .catch(reject);
+  });
+}
 
 // Helper function to create a simple fallback image
 async function createFallbackImage(jobId, index) {
@@ -210,26 +269,21 @@ async function processVideoJob(jobId) {
       });
     }
 
-    // Create editly spec with local image paths
-    const editlySpec = {
-      width: 1280,
-      height: 768,
-      fps: 30,
-      clips: clips,
-      outPath: `output/${jobId}.mp4`
-    };
-
-    console.log('Generating video with spec:', JSON.stringify(editlySpec, null, 2));
+    // Create video using FFmpeg instead of editly
+    const outputPath = `output/${jobId}.mp4`;
     
-    await editly(editlySpec);
+    console.log('Creating video with FFmpeg...');
+    console.log(`Images to process: ${clips.length}`);
+    
+    await createVideoWithFFmpeg(clips, outputPath);
     
     job.status = 'completed';
-    job.videoPath = editlySpec.outPath;
+    job.videoPath = outputPath;
     
-    console.log(`Video generated successfully: ${editlySpec.outPath}`);
+    console.log(`Video generated successfully: ${outputPath}`);
     
     // Send result back to n8n
-    await notifyN8n(job, editlySpec.outPath);
+    await notifyN8n(job, outputPath);
     
     // Cleanup downloaded images
     await cleanupFiles(downloadedFiles);
