@@ -17,4 +17,4 @@ COPY . .
 ENV PORT=3000
 
 # ВАЖНО: слушать 0.0.0.0 для Railway
-CMD ["node", "index.js"]
+CMD ["node", "server.js"]
