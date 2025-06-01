@@ -6,6 +6,8 @@ import fs from 'fs/promises';
 import path from 'path';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegPath from 'ffmpeg-static';
+process.env.FFMPEG_PATH = ffmpegPath;
+
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
