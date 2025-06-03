@@ -1,4 +1,4 @@
-// server.js
+// enhanced server.js for Railway deployment
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -8,80 +8,90 @@ import editly from 'editly';
 
 const app = express();
 const port = process.env.PORT || 3000;
-
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json());
 
 const JOBS = new Map();
 
-const ensureDirs = async () => {
-  await fs.mkdir('images', { recursive: true });
-  await fs.mkdir('output', { recursive: true });
-  await fs.mkdir('audio', { recursive: true });
+const getMediaPath = (requestId, type, filename) => path.join('media', requestId, type, filename);
+
+const ensureDirs = async (requestId) => {
+  const base = path.join('media', requestId);
+  await fs.mkdir(path.join(base, 'audio'), { recursive: true });
+  await fs.mkdir(path.join(base, 'images'), { recursive: true });
+  await fs.mkdir(path.join(base, 'text'), { recursive: true });
+  await fs.mkdir(path.join(base, 'video'), { recursive: true });
 };
 
-const downloadImages = async (supabaseData, jobId) => {
-  const dir = `images/${jobId}`;
-  await fs.mkdir(dir, { recursive: true });
-  const files = [];
+const buildEditSpec = async (requestId, numSlides) => {
+  const imageDir = path.join('media', requestId, 'images');
+  const audioDir = path.join('media', requestId, 'audio');
+  const textDir = path.join('media', requestId, 'text');
+  const clips = [];
 
-  for (let i = 0; i < supabaseData.length; i++) {
-    const url = supabaseData[i].image_url;
-    const res = await fetch(url);
-    const buffer = await res.buffer();
-    const filename = `${dir}/img${i}.jpg`;
-    await fs.writeFile(filename, buffer);
-    files.push(filename);
+  for (let i = 0; i < numSlides; i++) {
+    const imagePath = path.join(imageDir, `${i}.jpg`);
+    const audioPath = path.join(audioDir, `${i}.mp3`);
+    const textPath = path.join(textDir, `${i}.json`);
+
+    let textLayer = null;
+    try {
+      const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
+      textLayer = {
+        type: 'title',
+        text: textData.text,
+        position: textData.position || 'center',
+        color: textData.color || 'white',
+        fontSize: textData.fontSize || 48
+      };
+    } catch {
+      console.warn(`Missing or invalid text for slide ${i}`);
+    }
+
+    const layers = [
+      { type: 'image', path: imagePath },
+      ...(textLayer ? [textLayer] : [])
+    ];
+
+    clips.push({ duration: 4, audio: { path: audioPath }, layers });
   }
-  return files;
-};
 
-const generateEditlyVideo = async (files, jobId) => {
-  const clips = files.map((filePath, index) => ({
-    duration: 4,
-    layers: [
-      { type: 'image', path: filePath },
-      { type: 'audio', path: `audio/voice${index}.mp3` } // индивидуальная озвучка
-    ]
-  }));
+  const musicPath = path.join(audioDir, 'music.mp3');
+  const outPath = path.join('media', requestId, 'video', 'final.mp4');
 
-  const spec = {
+  return {
+    outPath,
     width: 1280,
     height: 720,
     fps: 30,
-    outPath: `output/${jobId}.mp4`,
-    audioFilePath: 'audio/background.mp3', // фоновая музыка
-    audioVolume: 0.3,
+    audio: { path: musicPath, mixVolume: 0.3 },
     clips
   };
-
-  await editly(spec);
-  return spec.outPath;
 };
 
 app.post('/register-job', async (req, res) => {
-  const { supabaseData, webhookUrl } = req.body;
-
-  if (!Array.isArray(supabaseData) || !webhookUrl) {
+  const { requestId, numSlides, webhookUrl } = req.body;
+  if (!requestId || !numSlides || !webhookUrl) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
+  await ensureDirs(requestId);
   const jobId = uuidv4();
-  JOBS.set(jobId, { status: 'pending', createdAt: new Date() });
+  JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
   res.json({ success: true, jobId });
 
   try {
-    const files = await downloadImages(supabaseData, jobId);
-    const videoPath = await generateEditlyVideo(files, jobId);
-    const videoBuffer = await fs.readFile(videoPath);
-    const videoBase64 = videoBuffer.toString('base64');
+    const spec = await buildEditSpec(requestId, numSlides);
+    await editly(spec);
+    const buffer = await fs.readFile(spec.outPath);
+    const base64 = buffer.toString('base64');
 
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, success: true, videoBase64 })
+      body: JSON.stringify({ jobId, success: true, videoBase64: base64 })
     });
 
-    JOBS.set(jobId, { status: 'completed', createdAt: new Date() });
+    JOBS.set(jobId, { status: 'completed', createdAt: new Date(), requestId });
   } catch (err) {
     console.error(err);
     JOBS.set(jobId, { status: 'failed', error: err.message });
@@ -99,6 +109,4 @@ app.get('/check-job/:jobId', (req, res) => {
   res.json(job);
 });
 
-ensureDirs().then(() => {
-  app.listen(port, () => console.log(`🎬 Editly server running on port ${port}`));
-});
+app.listen(port, () => console.log(`🎬 Editly server running on port ${port}`));
