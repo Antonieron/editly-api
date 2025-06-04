@@ -1,18 +1,44 @@
-// enhanced server.js for Railway deployment
+// enhanced server.js for Railway deployment with Supabase upload
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import editly from 'editly';
+import { createClient } from '@supabase/supabase-js';
 
 const app = express();
 const port = process.env.PORT || 3000;
 app.use(express.json());
 
-const JOBS = new Map();
+// Инициализация Supabase клиента
+const supabaseUrl = process.env.SUPABASE_URL || 'https://qpwsccpzxohrtvjrrncq.supabase.co';
+const supabaseKey = process.env.SUPABASE_ANON_KEY || 'ваш-ключ-здесь';
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-const getMediaPath = (requestId, type, filename) => path.join('media', requestId, type, filename);
+const JOBS = new Map();
+const JOB_LOGS = new Map();
+
+// Функция для логирования с сохранением в память
+const logToJob = (jobId, message, type = 'info') => {
+  if (!JOB_LOGS.has(jobId)) {
+    JOB_LOGS.set(jobId, []);
+  }
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    type,
+    message
+  };
+  JOB_LOGS.get(jobId).push(logEntry);
+  
+  // Ограничиваем количество логов (последние 100)
+  const logs = JOB_LOGS.get(jobId);
+  if (logs.length > 100) {
+    logs.splice(0, logs.length - 100);
+  }
+  
+  console.log(`[${jobId.slice(-8)}] ${message}`);
+};
 
 const ensureDirs = async (requestId) => {
   const base = path.join('media', requestId);
@@ -23,19 +49,40 @@ const ensureDirs = async (requestId) => {
 };
 
 // Функция для скачивания файла из Supabase
-const downloadFile = async (url, localPath) => {
+const downloadFile = async (url, localPath, timeout = 30000) => {
   try {
-    console.log(`Downloading: ${url}`);
-    const response = await fetch(url);
+    console.log(`⬇️  Downloading: ${url}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; VideoProcessor/1.0)'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
     if (!response.ok) {
-      throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
+    
+    const contentLength = response.headers.get('content-length');
+    console.log(`📦 Content-Length: ${contentLength ? `${Math.round(contentLength/1024)}KB` : 'unknown'}`);
+    
     const buffer = await response.buffer();
     await fs.writeFile(localPath, buffer);
-    console.log(`✓ Downloaded: ${path.basename(localPath)}`);
+    
+    console.log(`✅ Downloaded: ${path.basename(localPath)} (${Math.round(buffer.length/1024)}KB)`);
     return true;
   } catch (error) {
-    console.error(`✗ Error downloading ${url}:`, error.message);
+    if (error.name === 'AbortError') {
+      console.error(`⏰ Download timeout: ${url}`);
+    } else {
+      console.error(`❌ Download failed: ${url} - ${error.message}`);
+    }
     return false;
   }
 };
@@ -89,13 +136,57 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music)
   return results;
 };
 
-const buildEditSpec = async (requestId, numSlides) => {
+// Функция для загрузки видео в Supabase
+const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
+  try {
+    logToJob(jobId, 'Starting video upload to Supabase');
+    
+    const videoBuffer = await fs.readFile(videoPath);
+    const videoSizeMB = Math.round(videoBuffer.length / (1024 * 1024) * 100) / 100;
+    logToJob(jobId, `Uploading video: ${videoSizeMB}MB`);
+    
+    // Загружаем в bucket 'videos'
+    const fileName = `${requestId}/final.mp4`;
+    const { data, error } = await supabase.storage
+      .from('videos') // убедитесь что у вас есть bucket 'videos'
+      .upload(fileName, videoBuffer, {
+        contentType: 'video/mp4',
+        upsert: true // перезаписываем если файл уже существует
+      });
+    
+    if (error) {
+      logToJob(jobId, `Supabase upload error: ${error.message}`, 'error');
+      throw error;
+    }
+    
+    // Получаем публичную ссылку
+    const { data: publicUrlData } = supabase.storage
+      .from('videos')
+      .getPublicUrl(fileName);
+    
+    const publicUrl = publicUrlData.publicUrl;
+    logToJob(jobId, `Video uploaded successfully: ${publicUrl}`);
+    
+    return {
+      success: true,
+      path: data.path,
+      publicUrl: publicUrl,
+      size: videoBuffer.length
+    };
+    
+  } catch (error) {
+    logToJob(jobId, `Failed to upload video: ${error.message}`, 'error');
+    throw error;
+  }
+};
+
+const buildEditSpec = async (requestId, numSlides, jobId) => {
   const imageDir = path.join('media', requestId, 'images');
   const audioDir = path.join('media', requestId, 'audio');
   const textDir = path.join('media', requestId, 'text');
   const clips = [];
 
-  console.log(`Building edit spec for ${numSlides} slides`);
+  logToJob(jobId, `Building edit spec for ${numSlides} slides`);
 
   for (let i = 0; i < numSlides; i++) {
     const imagePath = path.join(imageDir, `${i}.jpg`);
@@ -110,18 +201,18 @@ const buildEditSpec = async (requestId, numSlides) => {
       await fs.access(imagePath);
       imageExists = true;
     } catch (e) {
-      console.warn(`⚠️  Image file missing for slide ${i}`);
+      logToJob(jobId, `Image file missing for slide ${i}`, 'warn');
     }
     
     try {
       await fs.access(audioPath);
       audioExists = true;
     } catch (e) {
-      console.warn(`⚠️  Audio file missing for slide ${i}`);
+      logToJob(jobId, `Audio file missing for slide ${i}`, 'warn');
     }
 
     if (!imageExists) {
-      console.error(`❌ Skipping slide ${i} - missing image`);
+      logToJob(jobId, `Skipping slide ${i} - missing image`, 'error');
       continue;
     }
 
@@ -138,7 +229,7 @@ const buildEditSpec = async (requestId, numSlides) => {
         };
       }
     } catch (e) {
-      console.warn(`⚠️  Text file missing/invalid for slide ${i}`);
+      logToJob(jobId, `Text file missing/invalid for slide ${i}`, 'warn');
     }
 
     const layers = [
@@ -160,7 +251,7 @@ const buildEditSpec = async (requestId, numSlides) => {
     }
 
     clips.push(clipConfig);
-    console.log(`✓ Added slide ${i} to clips`);
+    logToJob(jobId, `Added slide ${i} to clips`);
   }
 
   if (clips.length === 0) {
@@ -186,12 +277,12 @@ const buildEditSpec = async (requestId, numSlides) => {
   try {
     await fs.access(musicPath);
     spec.audio = { path: musicPath, mixVolume: 0.3 };
-    console.log('✓ Background music added');
+    logToJob(jobId, 'Background music added');
   } catch (e) {
-    console.warn('⚠️  Background music not found, proceeding without it');
+    logToJob(jobId, 'Background music not found, proceeding without it', 'warn');
   }
 
-  console.log(`Edit spec created with ${clips.length} clips`);
+  logToJob(jobId, `Edit spec created with ${clips.length} clips`);
   return spec;
 };
 
@@ -225,41 +316,63 @@ app.post('/register-job', async (req, res) => {
     res.json({ success: true, jobId });
 
     console.log(`🎬 Job ${jobId} started for request ${requestId}`);
+    logToJob(jobId, `Job started for request ${requestId}`);
 
     // Скачиваем все файлы из Supabase
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
+    logToJob(jobId, 'Starting file downloads from Supabase');
     await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music);
     
     // Обновляем статус
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
+    logToJob(jobId, 'Downloads completed, starting video processing');
     
     // Создаем видео
-    const spec = await buildEditSpec(requestId, numSlides);
-    console.log('🎥 Starting video creation...');
+    const spec = await buildEditSpec(requestId, numSlides, jobId);
+    logToJob(jobId, 'Starting video creation with editly');
     
     await editly(spec);
-    console.log('✅ Video creation completed');
+    logToJob(jobId, 'Video creation completed successfully');
     
-    // Читаем результат
-    const buffer = await fs.readFile(spec.outPath);
-    const base64 = buffer.toString('base64');
+    // Загружаем видео в Supabase
+    JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
+    const uploadResult = await uploadVideoToSupabase(spec.outPath, requestId, jobId);
+    
+    // Подготавливаем данные для webhook
+    const webhookPayload = {
+      jobId,
+      success: true,
+      requestId,
+      videoUrl: uploadResult.publicUrl,
+      videoPath: uploadResult.path,
+      videoSize: uploadResult.size,
+      timestamp: new Date().toISOString()
+    };
 
-    // Отправляем результат
+    // Отправляем результат через webhook
+    logToJob(jobId, 'Sending webhook with video URL');
     const webhookResponse = await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, success: true, videoBase64: base64 })
+      body: JSON.stringify(webhookPayload)
     });
 
     if (!webhookResponse.ok) {
-      console.warn(`Webhook response not OK: ${webhookResponse.status}`);
+      logToJob(jobId, `Webhook response not OK: ${webhookResponse.status}`, 'warn');
+    } else {
+      logToJob(jobId, 'Webhook sent successfully');
     }
 
-    JOBS.set(jobId, { status: 'completed', createdAt: new Date(), requestId });
-    console.log(`🎉 Job ${jobId} completed successfully`);
+    JOBS.set(jobId, { 
+      status: 'completed', 
+      createdAt: new Date(), 
+      requestId,
+      videoUrl: uploadResult.publicUrl 
+    });
+    logToJob(jobId, `Job completed successfully. Video available at: ${uploadResult.publicUrl}`);
 
-    // Очищаем временные файлы
-    setTimeout(() => cleanupFiles(requestId), 60000); // Очистка через 1 минуту
+    // Очищаем временные файлы (теперь можно быстрее, так как видео уже в облаке)
+    setTimeout(() => cleanupFiles(requestId), 30000); // 30 секунд
 
   } catch (err) {
     console.error(`💥 Job ${jobId} failed:`, err.message);
@@ -291,7 +404,38 @@ app.post('/register-job', async (req, res) => {
 app.get('/check-job/:jobId', (req, res) => {
   const job = JOBS.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  
+  const logs = JOB_LOGS.get(req.params.jobId) || [];
+  res.json({
+    ...job,
+    logs: logs.slice(-10), // Последние 10 логов
+    totalLogs: logs.length
+  });
+});
+
+// Endpoint для получения всех логов
+app.get('/job-logs/:jobId', (req, res) => {
+  const logs = JOB_LOGS.get(req.params.jobId) || [];
+  res.json({ logs, total: logs.length });
+});
+
+// Endpoint для получения ссылки на видео
+app.get('/video-url/:requestId', (req, res) => {
+  const { requestId } = req.params;
+  
+  // Ищем завершенную задачу с этим requestId
+  for (const [jobId, job] of JOBS.entries()) {
+    if (job.requestId === requestId && job.status === 'completed' && job.videoUrl) {
+      return res.json({
+        success: true,
+        videoUrl: job.videoUrl,
+        requestId,
+        jobId
+      });
+    }
+  }
+  
+  res.status(404).json({ error: 'Video not found or not ready' });
 });
 
 // Endpoint для проверки здоровья сервиса
@@ -300,7 +444,8 @@ app.get('/health', (req, res) => {
     status: 'ok', 
     timestamp: new Date().toISOString(),
     activeJobs: JOBS.size,
-    nodeVersion: process.version
+    nodeVersion: process.version,
+    supabaseConnected: !!supabase
   });
 });
 
@@ -312,6 +457,7 @@ setInterval(() => {
   for (const [jobId, job] of JOBS.entries()) {
     if (now - job.createdAt.getTime() > maxAge) {
       JOBS.delete(jobId);
+      JOB_LOGS.delete(jobId);
     }
   }
 }, 10 * 60 * 1000);
@@ -320,4 +466,5 @@ app.listen(port, () => {
   console.log(`🎬 Editly server running on port ${port}`);
   console.log(`🏥 Health check: http://localhost:${port}/health`);
   console.log(`📊 Node.js version: ${process.version}`);
+  console.log(`☁️  Supabase connected: ${!!supabase}`);
 });
