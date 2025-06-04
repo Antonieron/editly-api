@@ -22,7 +22,7 @@ const downloadFile = async (url, dest) => {
   await fs.writeFile(dest, buffer);
 };
 
-const downloadAssets = async (supabaseData, musicUrl, requestId) => {
+const downloadAssets = async (supabaseData, musicUrl, requestId, supabaseBaseUrl) => {
   const basePath = `media/${requestId}`;
   await fs.mkdir(basePath, { recursive: true });
 
@@ -41,21 +41,21 @@ const downloadAssets = async (supabaseData, musicUrl, requestId) => {
     const textPath = `${textDir}/${i}.json`;
 
     await Promise.all([
-      downloadFile(slide.image, imagePath),
-      downloadFile(slide.audio, audioPath),
-      downloadFile(slide.text, textPath),
+      downloadFile(new URL(slide.image, supabaseBaseUrl).href, imagePath),
+      downloadFile(new URL(slide.audio, supabaseBaseUrl).href, audioPath),
+      downloadFile(new URL(slide.text, supabaseBaseUrl).href, textPath),
     ]);
 
     const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
     slides.push({
       imagePath,
       audioPath,
-      subtitles: textData.subtitles || []
+      subtitles: textData.subtitles || [],
     });
   }
 
   const musicPath = `${audioDir}/music.mp3`;
-  await downloadFile(musicUrl, musicPath);
+  await downloadFile(new URL(musicUrl, supabaseBaseUrl).href, musicPath);
 
   return { slides, musicPath, outputPath: `${basePath}/final.mp4` };
 };
@@ -66,12 +66,12 @@ const createEditlyConfig = ({ slides, musicPath, outputPath }) => ({
   height: 1280,
   fps: 30,
   audioFilePath: musicPath,
-  clips: slides.map((slide, i) => ({
+  clips: slides.map((slide) => ({
     duration: 4,
     layers: [
       { type: 'image', path: slide.imagePath, zoomDirection: 'in' },
       ...(slide.subtitles.length > 0
-        ? slide.subtitles.map(sub => ({
+        ? slide.subtitles.map((sub) => ({
             type: 'title',
             text: sub.text,
             position: 'bottom',
@@ -88,7 +88,7 @@ const createEditlyConfig = ({ slides, musicPath, outputPath }) => ({
 app.post('/register-job', async (req, res) => {
   const { requestId, webhookUrl, supabaseData, supabaseBaseUrl, music } = req.body;
 
-  if (!requestId || !webhookUrl || !Array.isArray(supabaseData)) {
+  if (!requestId || !webhookUrl || !Array.isArray(supabaseData) || !supabaseBaseUrl || !music) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -96,8 +96,8 @@ app.post('/register-job', async (req, res) => {
   res.json({ success: true, requestId });
 
   try {
-    const musicUrl = `${supabaseBaseUrl}${music}`;
-    const assets = await downloadAssets(supabaseData, musicUrl, requestId);
+    const musicUrl = music;
+    const assets = await downloadAssets(supabaseData, musicUrl, requestId, supabaseBaseUrl);
 
     const config = createEditlyConfig(assets);
     await editly(config);
