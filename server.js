@@ -265,18 +265,27 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
     // КРИТИЧЕСКИ ВАЖНО: Правильная структура для editly с аудио
     const clipConfig = {
-      duration: audioExists ? undefined : 4, // Если есть аудио - duration определится автоматически по длине аудио
       layers
     };
 
-    // Добавляем аудио ПРАВИЛЬНО - это ключевой момент!
+    // Добавляем аудио ПРАВИЛЬНО для editly
     if (audioExists) {
-      // Способ 1: Аудио как отдельный слой (рекомендуемый)
+      // Способ 1: audioTracks в клипе (основной)
+      clipConfig.audioTracks = [{
+        path: audioPath,
+        start: 0,
+        mixVolume: 1.0 // Полная громкость для озвучки
+      }];
+      
+      // Способ 2: Также добавляем как слой (для совместимости)
       layers.push({
         type: 'audio',
-        path: audioPath
+        path: audioPath,
+        mixVolume: 1.0
       });
-      logToJob(jobId, `🔊 Audio layer added for slide ${i}`);
+      
+      // Duration определится автоматически по аудио
+      logToJob(jobId, `🔊 Audio track and layer added for slide ${i}`);
     } else {
       // Если нет аудио для слайда, используем фиксированную длительность
       clipConfig.duration = 4;
@@ -336,7 +345,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   
   // Подробная информация о каждом клипе для отладки
   clips.forEach((clip, index) => {
-    const hasAudio = clip.layers.some(layer => layer.type === 'audio');
+    const hasAudio = clip.audioTracks && clip.audioTracks.length > 0;
     const hasText = clip.layers.some(layer => layer.type === 'title');
     logToJob(jobId, `  - Clip ${index}: ${hasAudio ? '🔊' : '🔇'} ${hasText ? '📝' : '  '} ${clip.duration ? clip.duration + 's' : 'auto'}`);
   });
