@@ -4,128 +4,131 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import editly from 'editly';
-import ffmpegPath from 'ffmpeg-static';
-
-process.env.FFMPEG_PATH = ffmpegPath;
 
 const app = express();
 const port = process.env.PORT || 3000;
-
 app.use(express.json());
 
 const JOBS = new Map();
 
-const downloadFile = async (url, localPath) => {
+const ensureDirs = async () => {
+  await fs.mkdir('media', { recursive: true });
+};
+
+const downloadFile = async (url, dest) => {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download ${url}`);
-  const buffer = await res.arrayBuffer();
-  await fs.writeFile(localPath, Buffer.from(buffer));
+  const buffer = await res.buffer();
+  await fs.writeFile(dest, buffer);
 };
 
-const downloadAssets = async (data, jobId) => {
-  const baseUrl = data.supabaseBaseUrl;
-  const dir = `media/${jobId}`;
-  await fs.mkdir(`${dir}/images`, { recursive: true });
-  await fs.mkdir(`${dir}/audio`, { recursive: true });
-  await fs.mkdir(`${dir}/text`, { recursive: true });
+const downloadAssets = async (supabaseData, musicUrl, requestId) => {
+  const basePath = `media/${requestId}`;
+  await fs.mkdir(basePath, { recursive: true });
 
-  const promises = data.supabaseData.map(async (slide, index) => {
-    await downloadFile(`${baseUrl}${slide.image}`, `${dir}/images/${index}.jpg`);
-    await downloadFile(`${baseUrl}${slide.audio}`, `${dir}/audio/${index}.mp3`);
-    await downloadFile(`${baseUrl}${slide.text}`, `${dir}/text/${index}.json`);
-  });
+  const audioDir = `${basePath}/audio`;
+  const imageDir = `${basePath}/images`;
+  const textDir = `${basePath}/text`;
+  await Promise.all([fs.mkdir(audioDir), fs.mkdir(imageDir), fs.mkdir(textDir)]);
 
-  await Promise.all(promises);
-
-  if (data.music) {
-    await downloadFile(`${baseUrl}${data.music}`, `${dir}/audio/music.mp3`);
-  }
-
-  return dir;
-};
-
-const generateVideo = async (jobId, numSlides) => {
-  const dir = `media/${jobId}`;
   const slides = [];
 
-  for (let i = 0; i < numSlides; i++) {
-    const image = `${dir}/images/${i}.jpg`;
-    const audio = `${dir}/audio/${i}.mp3`;
-    const textPath = `${dir}/text/${i}.json`;
+  for (let i = 0; i < supabaseData.length; i++) {
+    const slide = supabaseData[i];
 
-    let title = '';
-    try {
-      const json = JSON.parse(await fs.readFile(textPath, 'utf-8'));
-      title = json.text || '';
-    } catch (e) {
-      console.warn(`Missing or invalid text for slide ${i}`);
-    }
+    const imagePath = `${imageDir}/${i}.jpg`;
+    const audioPath = `${audioDir}/${i}.mp3`;
+    const textPath = `${textDir}/${i}.json`;
 
+    await Promise.all([
+      downloadFile(slide.image, imagePath),
+      downloadFile(slide.audio, audioPath),
+      downloadFile(slide.text, textPath),
+    ]);
+
+    const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
     slides.push({
-      duration: 4,
-      layers: [
-        { type: 'image', path: image },
-        { type: 'subtitle', text: title },
-        { type: 'audio', path: audio }
-      ]
+      imagePath,
+      audioPath,
+      subtitles: textData.subtitles || []
     });
   }
 
-  const outPath = `${dir}/final.mp4`;
+  const musicPath = `${audioDir}/music.mp3`;
+  await downloadFile(musicUrl, musicPath);
 
-  await editly({
-    outPath,
-    width: 1280,
-    height: 720,
-    fps: 30,
-    audioFilePath: `${dir}/audio/music.mp3`,
-    clips: slides
-  });
-
-  return outPath;
+  return { slides, musicPath, outputPath: `${basePath}/final.mp4` };
 };
 
-app.post('/register-job', async (req, res) => {
-  const data = req.body;
+const createEditlyConfig = ({ slides, musicPath, outputPath }) => ({
+  outPath: outputPath,
+  width: 720,
+  height: 1280,
+  fps: 30,
+  audioFilePath: musicPath,
+  clips: slides.map((slide, i) => ({
+    duration: 4,
+    layers: [
+      { type: 'image', path: slide.imagePath, zoomDirection: 'in' },
+      ...(slide.subtitles.length > 0
+        ? slide.subtitles.map(sub => ({
+            type: 'title',
+            text: sub.text,
+            position: 'bottom',
+            fontSize: 36,
+            start: sub.start,
+            stop: sub.end,
+          }))
+        : []),
+      { type: 'audio', path: slide.audioPath },
+    ],
+  })),
+});
 
-  if (!data.requestId || !data.supabaseBaseUrl || !data.supabaseData || !data.webhookUrl) {
+app.post('/register-job', async (req, res) => {
+  const { requestId, webhookUrl, supabaseData, supabaseBaseUrl, music } = req.body;
+
+  if (!requestId || !webhookUrl || !Array.isArray(supabaseData)) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
-  const jobId = data.requestId;
-  JOBS.set(jobId, { status: 'pending', createdAt: new Date() });
-  res.json({ success: true, jobId });
+  JOBS.set(requestId, { status: 'pending', createdAt: new Date() });
+  res.json({ success: true, requestId });
 
   try {
-    const localDir = await downloadAssets(data, jobId);
-    const videoPath = await generateVideo(jobId, data.numSlides);
-    const videoBuffer = await fs.readFile(videoPath);
+    const musicUrl = `${supabaseBaseUrl}${music}`;
+    const assets = await downloadAssets(supabaseData, musicUrl, requestId);
+
+    const config = createEditlyConfig(assets);
+    await editly(config);
+
+    const videoBuffer = await fs.readFile(assets.outputPath);
     const videoBase64 = videoBuffer.toString('base64');
 
-    await fetch(data.webhookUrl, {
+    await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, success: true, videoBase64 })
+      body: JSON.stringify({ requestId, success: true, videoBase64 }),
     });
 
-    JOBS.set(jobId, { status: 'completed', createdAt: new Date() });
+    JOBS.set(requestId, { status: 'completed', createdAt: new Date() });
   } catch (err) {
     console.error(err);
-    JOBS.set(jobId, { status: 'failed', error: err.message });
-    await fetch(data.webhookUrl, {
+    JOBS.set(requestId, { status: 'failed', error: err.message });
+    await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jobId, success: false, error: err.message })
+      body: JSON.stringify({ requestId, success: false, error: err.message }),
     });
   }
 });
 
-app.get('/check-job/:jobId', (req, res) => {
-  const job = JOBS.get(req.params.jobId);
+app.get('/check-job/:requestId', (req, res) => {
+  const job = JOBS.get(req.params.requestId);
   if (!job) return res.status(404).json({ error: 'Not found' });
   res.json(job);
 });
 
-app.listen(port, () => {
-  console.log(`🎬 Editly server running on port ${port}`);
+ensureDirs().then(() => {
+  app.listen(port, () => console.log(`🎬 Editly server running on port ${port}`));
 });
