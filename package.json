@@ -1,13 +1,8 @@
 {
-  "name": "editly-api",
-  "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
-    "editly": "^0.15.0",
+    "editly": "^0.14.1",
     "express": "^4.18.2",
     "node-fetch": "^2.6.7",
     "uuid": "^9.0.0"
