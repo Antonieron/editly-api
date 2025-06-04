@@ -5,16 +5,13 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import editly from 'editly';
-import { createClient } from '@supabase/supabase-js';
-
 const app = express();
 const port = process.env.PORT || 3000;
 app.use(express.json());
 
-// Инициализация Supabase клиента
+// Supabase конфигурация
 const supabaseUrl = process.env.SUPABASE_URL || 'https://qpwsccpzxohrtvjrrncq.supabase.co';
 const supabaseKey = process.env.SUPABASE_ANON_KEY || 'ваш-ключ-здесь';
-const supabase = createClient(supabaseUrl, supabaseKey);
 
 const JOBS = new Map();
 const JOB_LOGS = new Map();
@@ -136,7 +133,7 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music)
   return results;
 };
 
-// Функция для загрузки видео в Supabase
+// Функция для загрузки видео в Supabase через REST API
 const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
   try {
     logToJob(jobId, 'Starting video upload to Supabase');
@@ -145,31 +142,33 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
     const videoSizeMB = Math.round(videoBuffer.length / (1024 * 1024) * 100) / 100;
     logToJob(jobId, `Uploading video: ${videoSizeMB}MB`);
     
-    // Загружаем в bucket 'videos'
+    // Загружаем через REST API
     const fileName = `${requestId}/final.mp4`;
-    const { data, error } = await supabase.storage
-      .from('videos') // убедитесь что у вас есть bucket 'videos'
-      .upload(fileName, videoBuffer, {
-        contentType: 'video/mp4',
-        upsert: true // перезаписываем если файл уже существует
-      });
+    const uploadUrl = `${supabaseUrl}/storage/v1/object/videos/${fileName}`;
     
-    if (error) {
-      logToJob(jobId, `Supabase upload error: ${error.message}`, 'error');
-      throw error;
+    const response = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${supabaseKey}`,
+        'Content-Type': 'video/mp4',
+        'x-upsert': 'true' // перезаписываем если файл уже существует
+      },
+      body: videoBuffer
+    });
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      logToJob(jobId, `Supabase upload error: ${response.status} - ${errorText}`, 'error');
+      throw new Error(`Upload failed: ${response.status} - ${errorText}`);
     }
     
     // Получаем публичную ссылку
-    const { data: publicUrlData } = supabase.storage
-      .from('videos')
-      .getPublicUrl(fileName);
-    
-    const publicUrl = publicUrlData.publicUrl;
+    const publicUrl = `${supabaseUrl}/storage/v1/object/public/videos/${fileName}`;
     logToJob(jobId, `Video uploaded successfully: ${publicUrl}`);
     
     return {
       success: true,
-      path: data.path,
+      path: fileName,
       publicUrl: publicUrl,
       size: videoBuffer.length
     };
@@ -445,7 +444,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     activeJobs: JOBS.size,
     nodeVersion: process.version,
-    supabaseConnected: !!supabase
+    supabaseUrl: supabaseUrl
   });
 });
 
@@ -466,5 +465,5 @@ app.listen(port, () => {
   console.log(`🎬 Editly server running on port ${port}`);
   console.log(`🏥 Health check: http://localhost:${port}/health`);
   console.log(`📊 Node.js version: ${process.version}`);
-  console.log(`☁️  Supabase connected: ${!!supabase}`);
+  console.log(`☁️  Supabase URL: ${supabaseUrl}`);
 });
