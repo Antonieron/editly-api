@@ -1,3 +1,4 @@
+// server.js
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,20 +17,21 @@ const ensureDirs = async () => {
 };
 
 const downloadFile = async (url, dest) => {
+  if (!url.startsWith('http')) throw new Error(`Invalid URL: ${url}`);
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to download ${url}`);
   const buffer = await res.buffer();
   await fs.writeFile(dest, buffer);
 };
 
-const downloadAssets = async (supabaseData, musicUrl, requestId, supabaseBaseUrl) => {
+const downloadAssets = async (supabaseData, musicUrl, requestId) => {
   const basePath = `media/${requestId}`;
   await fs.mkdir(basePath, { recursive: true });
 
   const audioDir = `${basePath}/audio`;
   const imageDir = `${basePath}/images`;
   const textDir = `${basePath}/text`;
-  await Promise.all([fs.mkdir(audioDir), fs.mkdir(imageDir), fs.mkdir(textDir)]);
+  await Promise.all([fs.mkdir(audioDir, { recursive: true }), fs.mkdir(imageDir, { recursive: true }), fs.mkdir(textDir, { recursive: true })]);
 
   const slides = [];
 
@@ -41,21 +43,21 @@ const downloadAssets = async (supabaseData, musicUrl, requestId, supabaseBaseUrl
     const textPath = `${textDir}/${i}.json`;
 
     await Promise.all([
-      downloadFile(new URL(slide.image, supabaseBaseUrl).href, imagePath),
-      downloadFile(new URL(slide.audio, supabaseBaseUrl).href, audioPath),
-      downloadFile(new URL(slide.text, supabaseBaseUrl).href, textPath),
+      downloadFile(`${slide.image}`, imagePath),
+      downloadFile(`${slide.audio}`, audioPath),
+      downloadFile(`${slide.text}`, textPath),
     ]);
 
     const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
     slides.push({
       imagePath,
       audioPath,
-      subtitles: textData.subtitles || [],
+      subtitles: textData.subtitles || []
     });
   }
 
   const musicPath = `${audioDir}/music.mp3`;
-  await downloadFile(new URL(musicUrl, supabaseBaseUrl).href, musicPath);
+  await downloadFile(musicUrl, musicPath);
 
   return { slides, musicPath, outputPath: `${basePath}/final.mp4` };
 };
@@ -66,29 +68,27 @@ const createEditlyConfig = ({ slides, musicPath, outputPath }) => ({
   height: 1280,
   fps: 30,
   audioFilePath: musicPath,
-  clips: slides.map((slide) => ({
+  clips: slides.map(slide => ({
     duration: 4,
     layers: [
       { type: 'image', path: slide.imagePath, zoomDirection: 'in' },
-      ...(slide.subtitles.length > 0
-        ? slide.subtitles.map((sub) => ({
-            type: 'title',
-            text: sub.text,
-            position: 'bottom',
-            fontSize: 36,
-            start: sub.start,
-            stop: sub.end,
-          }))
-        : []),
+      ...slide.subtitles.map(sub => ({
+        type: 'title',
+        text: sub.text,
+        position: 'bottom',
+        fontSize: 36,
+        start: sub.start,
+        stop: sub.end,
+      })),
       { type: 'audio', path: slide.audioPath },
-    ],
-  })),
+    ]
+  }))
 });
 
 app.post('/register-job', async (req, res) => {
   const { requestId, webhookUrl, supabaseData, supabaseBaseUrl, music } = req.body;
 
-  if (!requestId || !webhookUrl || !Array.isArray(supabaseData) || !supabaseBaseUrl || !music) {
+  if (!requestId || !webhookUrl || !Array.isArray(supabaseData)) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
@@ -96,8 +96,8 @@ app.post('/register-job', async (req, res) => {
   res.json({ success: true, requestId });
 
   try {
-    const musicUrl = music;
-    const assets = await downloadAssets(supabaseData, musicUrl, requestId, supabaseBaseUrl);
+    const musicUrl = supabaseBaseUrl + music;
+    const assets = await downloadAssets(supabaseData, musicUrl, requestId);
 
     const config = createEditlyConfig(assets);
     await editly(config);
@@ -130,5 +130,5 @@ app.get('/check-job/:requestId', (req, res) => {
 });
 
 ensureDirs().then(() => {
-  app.listen(port, () => console.log(`🎬 Editly server running on port ${port}`));
+  app.listen(port, () => console.log(`\uD83C\uDFAC Editly server running on port ${port}`));
 });
