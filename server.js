@@ -1,4 +1,51 @@
-// enhanced server.js for Railway deployment
+// Функция для загрузки всех файлов из Supabase
+const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music) => {
+  console.log(`🚀 Starting downloads for request: ${requestId}`);
+  console.log(`📍 Base URL: ${supabaseBaseUrl}`);
+  console.log(`📊 Total slides: ${supabaseData.length}`);
+  
+  const results = {
+    music: false,
+    slides: [],
+    totalFiles: 0,
+    successfulFiles: 0
+  };
+  
+  // Скачиваем музыку
+  if (music) {
+    console.log(`🎵 Downloading music: ${music}`);
+    const musicUrl = `${supabaseBaseUrl}${music}`;
+    const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
+    results.music = await downloadFile(musicUrl, musicPath);
+    results.totalFiles++;
+    if (results.music) results.successfulFiles++;
+  } else {
+    console.log(`⚠️  No music file provided`);
+  }
+  
+  // Скачиваем файлы для каждого слайда
+  for (let i = 0; i < supabaseData.length; i++) {
+    const slide = supabaseData[i];
+    console.log(`\n📄 Processing slide ${i + 1}/${supabaseData.length}`);
+    
+    const slideResult = { index: i, image: false, audio: false, text: false };
+    
+    // Скачиваем изображение
+    if (slide.image) {
+      console.log(`🖼️  Image: ${slide.image}`);
+      const imageUrl = `${supabaseBaseUrl}${slide.image}`;
+      const imagePath = path.join('media', requestId, 'images', `${i}.jpg`);
+      slideResult.image = await downloadFile(imageUrl, imagePath);
+      results.totalFiles++;
+      if (slideResult.image) results.successfulFiles++;
+    } else {
+      console.log(`⚠️  No image for slide ${i}`);
+    }
+    
+    // Скачиваем аудио
+    if (slide.audio) {
+      console.log(`🔊 Audio: ${slide.audio}`);
+      const audio// enhanced server.js for Railway deployment
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -11,8 +58,28 @@ const port = process.env.PORT || 3000;
 app.use(express.json());
 
 const JOBS = new Map();
+const JOB_LOGS = new Map();
 
-const getMediaPath = (requestId, type, filename) => path.join('media', requestId, type, filename);
+// Функция для логирования с сохранением в память
+const logToJob = (jobId, message, type = 'info') => {
+  if (!JOB_LOGS.has(jobId)) {
+    JOB_LOGS.set(jobId, []);
+  }
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    type,
+    message
+  };
+  JOB_LOGS.get(jobId).push(logEntry);
+  
+  // Ограничиваем количество логов (последние 100)
+  const logs = JOB_LOGS.get(jobId);
+  if (logs.length > 100) {
+    logs.splice(0, logs.length - 100);
+  }
+  
+  console.log(`[${jobId.slice(-8)}] ${message}`);
+};
 
 const ensureDirs = async (requestId) => {
   const base = path.join('media', requestId);
@@ -23,19 +90,40 @@ const ensureDirs = async (requestId) => {
 };
 
 // Функция для скачивания файла из Supabase
-const downloadFile = async (url, localPath) => {
+const downloadFile = async (url, localPath, timeout = 30000) => {
   try {
-    console.log(`Downloading: ${url}`);
-    const response = await fetch(url);
+    console.log(`⬇️  Downloading: ${url}`);
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    
+    const response = await fetch(url, { 
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; VideoProcessor/1.0)'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
     if (!response.ok) {
-      throw new Error(`Failed to download ${url}: ${response.status} ${response.statusText}`);
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
+    
+    const contentLength = response.headers.get('content-length');
+    console.log(`📦 Content-Length: ${contentLength ? `${Math.round(contentLength/1024)}KB` : 'unknown'}`);
+    
     const buffer = await response.buffer();
     await fs.writeFile(localPath, buffer);
-    console.log(`✓ Downloaded: ${path.basename(localPath)}`);
+    
+    console.log(`✅ Downloaded: ${path.basename(localPath)} (${Math.round(buffer.length/1024)}KB)`);
     return true;
   } catch (error) {
-    console.error(`✗ Error downloading ${url}:`, error.message);
+    if (error.name === 'AbortError') {
+      console.error(`⏰ Download timeout: ${url}`);
+    } else {
+      console.error(`❌ Download failed: ${url} - ${error.message}`);
+    }
     return false;
   }
 };
@@ -89,13 +177,13 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music)
   return results;
 };
 
-const buildEditSpec = async (requestId, numSlides) => {
+const buildEditSpec = async (requestId, numSlides, jobId) => {
   const imageDir = path.join('media', requestId, 'images');
   const audioDir = path.join('media', requestId, 'audio');
   const textDir = path.join('media', requestId, 'text');
   const clips = [];
 
-  console.log(`Building edit spec for ${numSlides} slides`);
+  logToJob(jobId, `Building edit spec for ${numSlides} slides`);
 
   for (let i = 0; i < numSlides; i++) {
     const imagePath = path.join(imageDir, `${i}.jpg`);
@@ -110,18 +198,18 @@ const buildEditSpec = async (requestId, numSlides) => {
       await fs.access(imagePath);
       imageExists = true;
     } catch (e) {
-      console.warn(`⚠️  Image file missing for slide ${i}`);
+      logToJob(jobId, `Image file missing for slide ${i}`, 'warn');
     }
     
     try {
       await fs.access(audioPath);
       audioExists = true;
     } catch (e) {
-      console.warn(`⚠️  Audio file missing for slide ${i}`);
+      logToJob(jobId, `Audio file missing for slide ${i}`, 'warn');
     }
 
     if (!imageExists) {
-      console.error(`❌ Skipping slide ${i} - missing image`);
+      logToJob(jobId, `Skipping slide ${i} - missing image`, 'error');
       continue;
     }
 
@@ -138,7 +226,7 @@ const buildEditSpec = async (requestId, numSlides) => {
         };
       }
     } catch (e) {
-      console.warn(`⚠️  Text file missing/invalid for slide ${i}`);
+      logToJob(jobId, `Text file missing/invalid for slide ${i}`, 'warn');
     }
 
     const layers = [
@@ -160,7 +248,7 @@ const buildEditSpec = async (requestId, numSlides) => {
     }
 
     clips.push(clipConfig);
-    console.log(`✓ Added slide ${i} to clips`);
+    logToJob(jobId, `Added slide ${i} to clips`);
   }
 
   if (clips.length === 0) {
@@ -186,12 +274,12 @@ const buildEditSpec = async (requestId, numSlides) => {
   try {
     await fs.access(musicPath);
     spec.audio = { path: musicPath, mixVolume: 0.3 };
-    console.log('✓ Background music added');
+    logToJob(jobId, 'Background music added');
   } catch (e) {
-    console.warn('⚠️  Background music not found, proceeding without it');
+    logToJob(jobId, 'Background music not found, proceeding without it', 'warn');
   }
 
-  console.log(`Edit spec created with ${clips.length} clips`);
+  logToJob(jobId, `Edit spec created with ${clips.length} clips`);
   return spec;
 };
 
@@ -225,24 +313,31 @@ app.post('/register-job', async (req, res) => {
     res.json({ success: true, jobId });
 
     console.log(`🎬 Job ${jobId} started for request ${requestId}`);
+    logToJob(jobId, `Job started for request ${requestId}`);
 
     // Скачиваем все файлы из Supabase
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
+    logToJob(jobId, 'Starting file downloads from Supabase');
     await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music);
     
     // Обновляем статус
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
+    logToJob(jobId, 'Downloads completed, starting video processing');
     
     // Создаем видео
-    const spec = await buildEditSpec(requestId, numSlides);
-    console.log('🎥 Starting video creation...');
+    const spec = await buildEditSpec(requestId, numSlides, jobId);
+    logToJob(jobId, 'Starting video creation with editly');
     
     await editly(spec);
-    console.log('✅ Video creation completed');
+    logToJob(jobId, 'Video creation completed successfully');
     
     // Читаем результат
     const buffer = await fs.readFile(spec.outPath);
+    const videoSizeMB = Math.round(buffer.length / (1024 * 1024) * 100) / 100;
+    logToJob(jobId, `Video file created: ${videoSizeMB}MB`);
+    
     const base64 = buffer.toString('base64');
+    logToJob(jobId, 'Converting video to base64 for webhook');
 
     // Отправляем результат
     const webhookResponse = await fetch(webhookUrl, {
@@ -252,11 +347,13 @@ app.post('/register-job', async (req, res) => {
     });
 
     if (!webhookResponse.ok) {
-      console.warn(`Webhook response not OK: ${webhookResponse.status}`);
+      logToJob(jobId, `Webhook response not OK: ${webhookResponse.status}`, 'warn');
+    } else {
+      logToJob(jobId, 'Webhook sent successfully');
     }
 
     JOBS.set(jobId, { status: 'completed', createdAt: new Date(), requestId });
-    console.log(`🎉 Job ${jobId} completed successfully`);
+    logToJob(jobId, 'Job completed successfully');
 
     // Очищаем временные файлы
     setTimeout(() => cleanupFiles(requestId), 60000); // Очистка через 1 минуту
@@ -291,7 +388,19 @@ app.post('/register-job', async (req, res) => {
 app.get('/check-job/:jobId', (req, res) => {
   const job = JOBS.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json(job);
+  
+  const logs = JOB_LOGS.get(req.params.jobId) || [];
+  res.json({
+    ...job,
+    logs: logs.slice(-10), // Последние 10 логов
+    totalLogs: logs.length
+  });
+});
+
+// Новый endpoint для получения всех логов
+app.get('/job-logs/:jobId', (req, res) => {
+  const logs = JOB_LOGS.get(req.params.jobId) || [];
+  res.json({ logs, total: logs.length });
 });
 
 // Endpoint для проверки здоровья сервиса
