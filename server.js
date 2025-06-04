@@ -1,10 +1,14 @@
-// enhanced server.js with FIXED audio support
+// enhanced server.js with FIXED audio support and duration measurement
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
 import path from 'path';
 import editly from 'editly';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 const app = express();
 const port = process.env.PORT || 3000;
 app.use(express.json());
@@ -35,6 +39,26 @@ const logToJob = (jobId, message, type = 'info') => {
   }
   
   console.log(`[${jobId.slice(-8)}] ${message}`);
+};
+
+// Функция для получения длительности аудиофайла через ffprobe
+const getAudioDuration = async (audioPath, jobId) => {
+  try {
+    const command = `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${audioPath}"`;
+    const { stdout } = await execAsync(command);
+    const duration = parseFloat(stdout.trim());
+    
+    if (isNaN(duration) || duration <= 0) {
+      logToJob(jobId, `⚠️ Invalid audio duration for ${audioPath}: ${stdout.trim()}`, 'warn');
+      return 4; // Fallback to 4 seconds
+    }
+    
+    logToJob(jobId, `🎵 Audio duration: ${duration.toFixed(2)}s for ${path.basename(audioPath)}`);
+    return duration;
+  } catch (error) {
+    logToJob(jobId, `❌ Failed to get audio duration for ${audioPath}: ${error.message}`, 'error');
+    return 4; // Fallback to 4 seconds
+  }
 };
 
 const ensureDirs = async (requestId) => {
@@ -254,6 +278,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       logToJob(jobId, `❌ Text file missing/invalid for slide ${i}`, 'warn');
     }
 
+    // Получаем длительность аудио если оно есть
+    let clipDuration = 4; // Default duration
+    if (audioExists) {
+      clipDuration = await getAudioDuration(audioPath, jobId);
+    }
+
     // Создаем слои для клипа
     const layers = [
       { type: 'image', path: imagePath }
@@ -263,37 +293,27 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       layers.push(textLayer);
     }
 
-    // КРИТИЧЕСКИ ВАЖНО: Правильная структура для editly с аудио
+    // ИСПРАВЛЕНО: Правильная структура клипа с фиксированной длительностью
     const clipConfig = {
-      layers
+      layers,
+      duration: clipDuration // ВАЖНО: устанавливаем точную длительность
     };
 
-    // Добавляем аудио ПРАВИЛЬНО для editly
+    // Добавляем аудио как отдельную дорожку
     if (audioExists) {
-      // Способ 1: audioTracks в клипе (основной)
       clipConfig.audioTracks = [{
         path: audioPath,
         start: 0,
         mixVolume: 1.0 // Полная громкость для озвучки
       }];
       
-      // Способ 2: Также добавляем как слой (для совместимости)
-      layers.push({
-        type: 'audio',
-        path: audioPath,
-        mixVolume: 1.0
-      });
-      
-      // Duration определится автоматически по аудио
-      logToJob(jobId, `🔊 Audio track and layer added for slide ${i}`);
+      logToJob(jobId, `🔊 Audio track added for slide ${i} (${clipDuration.toFixed(2)}s)`);
     } else {
-      // Если нет аудио для слайда, используем фиксированную длительность
-      clipConfig.duration = 4;
-      logToJob(jobId, `⏱️ Fixed duration 4s for slide ${i} (no audio)`);
+      logToJob(jobId, `⏱️ Silent slide ${i} (${clipDuration}s)`);
     }
 
     clips.push(clipConfig);
-    logToJob(jobId, `Added slide ${i} to clips (${audioExists ? 'with audio' : 'silent'})`);
+    logToJob(jobId, `Added slide ${i} to clips (${audioExists ? 'with audio' : 'silent'}, ${clipDuration.toFixed(2)}s)`);
   }
 
   if (clips.length === 0) {
@@ -310,13 +330,17 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     height: 720,
     fps: 30,
     clips,
-    // Отключаем сложные переходы для стабильности
+    // Простые переходы для стабильности
     defaults: {
-      transition: { name: 'fade', duration: 0.5 }
+      transition: { name: 'fade', duration: 0.3 }
     },
-    // ВАЖНО: Убеждаемся что аудио включено
-    enableFfmpegLog: true, // для отладки
-    verbose: true
+    // Включаем подробное логирование
+    enableFfmpegLog: true,
+    verbose: true,
+    // ВАЖНО: Отключаем нормализацию аудио чтобы сохранить исходную громкость
+    audioNorm: {
+      enable: false
+    }
   };
 
   // Проверяем и добавляем фоновую музыку
@@ -326,17 +350,23 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     musicExists = true;
     logToJob(jobId, '🎵 Background music file found');
     
-    // ПРАВИЛЬНЫЙ способ добавления фоновой музыки в editly
+    // Добавляем фоновую музыку как глобальную дорожку
     spec.audioTracks = [{
       path: musicPath,
-      mixVolume: 0.2, // Тише чем голос
-      start: 0
+      mixVolume: 0.15, // Еще тише чтобы не заглушать голос
+      start: 0,
+      // Зацикливаем музыку если видео длиннее
+      cutFrom: 0
     }];
     
-    logToJob(jobId, '🎵 Background music track added to spec');
+    logToJob(jobId, '🎵 Background music track added to spec (volume: 0.15)');
   } catch (e) {
     logToJob(jobId, '❌ Background music file not found, proceeding without it', 'warn');
   }
+
+  // Подсчитаем общую длительность видео
+  const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
+  logToJob(jobId, `📊 Total video duration: ${totalDuration.toFixed(2)}s (${Math.round(totalDuration/60)}:${String(Math.round(totalDuration%60)).padStart(2, '0')})`);
 
   logToJob(jobId, `Edit spec created successfully:`);
   logToJob(jobId, `  - Clips: ${clips.length}`);
@@ -347,7 +377,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   clips.forEach((clip, index) => {
     const hasAudio = clip.audioTracks && clip.audioTracks.length > 0;
     const hasText = clip.layers.some(layer => layer.type === 'title');
-    logToJob(jobId, `  - Clip ${index}: ${hasAudio ? '🔊' : '🔇'} ${hasText ? '📝' : '  '} ${clip.duration ? clip.duration + 's' : 'auto'}`);
+    logToJob(jobId, `  - Clip ${index}: ${hasAudio ? '🔊' : '🔇'} ${hasText ? '📝' : '  '} ${clip.duration.toFixed(2)}s`);
   });
 
   return spec;
