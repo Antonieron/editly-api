@@ -19,82 +19,89 @@ const JOBS = new Map();
 const JOB_LOGS = new Map();
 
 const logToJob = (jobId, message, type = 'info') => {
-  if (!JOB_LOGS.has(jobId)) {
-    JOB_LOGS.set(jobId, []);
-  }
-  const logEntry = {
-    timestamp: new Date().toISOString(),
-    type,
-    message
-  };
-  JOB_LOGS.get(jobId).push(logEntry);
+  if (!JOB_LOGS.has(jobId)) JOB_LOGS.set(jobId, []);
+  JOB_LOGS.get(jobId).push({ timestamp: new Date().toISOString(), type, message });
   const logs = JOB_LOGS.get(jobId);
-  if (logs.length > 100) {
-    logs.splice(0, logs.length - 100);
-  }
+  if (logs.length > 100) logs.splice(0, logs.length - 100);
   console.log(`[${jobId.slice(-8)}] ${message}`);
 };
 
 const getAudioDuration = async (audioPath) => {
   try {
-    const command = `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${audioPath}"`;
-    const { stdout } = await execAsync(command);
+    const { stdout } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${audioPath}"`);
     return parseFloat(stdout.trim());
   } catch (error) {
     return 4.0;
   }
 };
 
-const createAudioMix = async (voiceAudioPath, backgroundMusicPath, outputPath, duration, jobId) => {
+const createMasterAudio = async (requestId, clips, jobId) => {
   try {
-    logToJob(jobId, `Creating audio mix for ${duration}s`);
+    const masterAudioPath = path.join('media', requestId, 'audio', 'master.mp3');
+    const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
     
-    let command = `ffmpeg -y -i "${voiceAudioPath}"`;
-    
-    let hasBackgroundMusic = false;
+    let hasMusic = false;
     try {
-      await fs.access(backgroundMusicPath);
-      hasBackgroundMusic = true;
-      command += ` -i "${backgroundMusicPath}"`;
-    } catch (e) {
-      logToJob(jobId, 'No background music');
+      await fs.access(musicPath);
+      hasMusic = true;
+    } catch (e) {}
+    
+    let filterComplex = '';
+    let inputs = '';
+    let currentTime = 0;
+    
+    for (let i = 0; i < clips.length; i++) {
+      if (clips[i].voiceAudio) {
+        inputs += ` -i "${clips[i].voiceAudio}"`;
+      }
     }
     
-    if (hasBackgroundMusic) {
-      command += ` -filter_complex "[0:a]volume=1.0[voice];[1:a]volume=0.2,aloop=loop=-1:size=2e+09[bg];[voice][bg]amix=inputs=2:duration=first:dropout_transition=0" -t ${duration} -c:a aac -b:a 128k -ar 44100 -ac 2 "${outputPath}"`;
+    if (hasMusic) {
+      inputs += ` -i "${musicPath}"`;
+    }
+    
+    let voiceIndex = 0;
+    for (let i = 0; i < clips.length; i++) {
+      if (clips[i].voiceAudio) {
+        filterComplex += `[${voiceIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[v${i}];`;
+        voiceIndex++;
+      }
+      currentTime += clips[i].duration;
+    }
+    
+    let mixInputs = '';
+    for (let i = 0; i < clips.length; i++) {
+      if (clips[i].voiceAudio) {
+        mixInputs += `[v${i}]`;
+      }
+    }
+    
+    if (hasMusic) {
+      const musicIndex = voiceIndex;
+      filterComplex += `[${musicIndex}:a]volume=0.3,aloop=loop=-1:size=2e+09[bg];`;
+      filterComplex += `${mixInputs}[bg]amix=inputs=${voiceIndex + 1}:duration=longest`;
     } else {
-      command += ` -filter_complex "[0:a]volume=1.0" -t ${duration} -c:a aac -b:a 128k -ar 44100 -ac 2 "${outputPath}"`;
+      filterComplex += `${mixInputs}amix=inputs=${voiceIndex}:duration=longest`;
     }
     
+    const command = `ffmpeg -y${inputs} -filter_complex "${filterComplex}" -t ${currentTime} -c:a aac -b:a 128k -ar 44100 -ac 2 "${masterAudioPath}"`;
+    
+    logToJob(jobId, `Creating master audio: ${command}`);
     await execAsync(command);
     
-    try {
-      await fs.access(outputPath);
-      logToJob(jobId, 'Audio mix created successfully');
-      return true;
-    } catch (e) {
-      throw new Error('Output file not created');
-    }
+    await fs.access(masterAudioPath);
+    logToJob(jobId, 'Master audio created successfully');
+    return masterAudioPath;
     
   } catch (error) {
-    logToJob(jobId, `Audio mix failed: ${error.message}`, 'error');
-    
-    try {
-      const fallbackCommand = `ffmpeg -y -i "${voiceAudioPath}" -t ${duration} -c:a aac -b:a 128k -ar 44100 -ac 2 "${outputPath}"`;
-      await execAsync(fallbackCommand);
-      logToJob(jobId, 'Fallback to voice-only successful');
-      return true;
-    } catch (fallbackError) {
-      logToJob(jobId, `Fallback failed: ${fallbackError.message}`, 'error');
-      return false;
-    }
+    logToJob(jobId, `Master audio failed: ${error.message}`, 'error');
+    return null;
   }
 };
 
 const ensureDirs = async (requestId) => {
   const base = path.join('media', requestId);
   await fs.mkdir(path.join(base, 'audio'), { recursive: true });
-  await fs.mkdir(path.join(base, 'audio', 'mixed'), { recursive: true });
   await fs.mkdir(path.join(base, 'images'), { recursive: true });
   await fs.mkdir(path.join(base, 'text'), { recursive: true });
   await fs.mkdir(path.join(base, 'video'), { recursive: true });
@@ -102,47 +109,32 @@ const ensureDirs = async (requestId) => {
 
 const downloadFile = async (url, localPath, timeout = 30000) => {
   try {
-    console.log(`Downloading: ${url}`);
-    
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
     
     const response = await fetch(url, { 
       signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; VideoProcessor/1.0)'
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VideoProcessor/1.0)' }
     });
     
     clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
     
     const buffer = await response.buffer();
     await fs.writeFile(localPath, buffer);
-    
-    console.log(`Downloaded: ${path.basename(localPath)} (${Math.round(buffer.length/1024)}KB)`);
     return true;
   } catch (error) {
-    console.error(`Download failed: ${url} - ${error.message}`);
+    console.error(`Download failed: ${url}`);
     return false;
   }
 };
 
 const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music, jobId) => {
-  logToJob(jobId, `Starting downloads for request: ${requestId}`);
-  
-  const results = {
-    music: false,
-    slides: []
-  };
+  const results = { music: false, slides: [] };
   
   if (music) {
     const musicUrl = `${supabaseBaseUrl}${music}`;
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
-    logToJob(jobId, `Downloading background music`);
     results.music = await downloadFile(musicUrl, musicPath);
   }
   
@@ -175,61 +167,38 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
 };
 
 const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
-  try {
-    logToJob(jobId, 'Starting video upload to Supabase');
-    
-    const videoBuffer = await fs.readFile(videoPath);
-    const videoSizeMB = Math.round(videoBuffer.length / (1024 * 1024) * 100) / 100;
-    logToJob(jobId, `Uploading video: ${videoSizeMB}MB`);
-    
-    const fileName = `${requestId}/final.mp4`;
-    const uploadUrl = `${supabaseUrl}/storage/v1/object/videos/${fileName}`;
-    
-    const response = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${supabaseKey}`,
-        'Content-Type': 'video/mp4',
-        'x-upsert': 'true'
-      },
-      body: videoBuffer
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Upload failed: ${response.status} - ${errorText}`);
-    }
-    
-    const publicUrl = `${supabaseUrl}/storage/v1/object/public/videos/${fileName}`;
-    logToJob(jobId, `Video uploaded successfully`);
-    
-    return {
-      success: true,
-      path: fileName,
-      publicUrl: publicUrl,
-      size: videoBuffer.length
-    };
-    
-  } catch (error) {
-    logToJob(jobId, `Failed to upload video: ${error.message}`, 'error');
-    throw error;
+  const videoBuffer = await fs.readFile(videoPath);
+  const fileName = `${requestId}/final.mp4`;
+  const uploadUrl = `${supabaseUrl}/storage/v1/object/videos/${fileName}`;
+  
+  const response = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${supabaseKey}`,
+      'Content-Type': 'video/mp4',
+      'x-upsert': 'true'
+    },
+    body: videoBuffer
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Upload failed: ${response.status}`);
   }
+  
+  const publicUrl = `${supabaseUrl}/storage/v1/object/public/videos/${fileName}`;
+  return { success: true, path: fileName, publicUrl, size: videoBuffer.length };
 };
 
 const buildEditSpec = async (requestId, numSlides, jobId) => {
   const imageDir = path.join('media', requestId, 'images');
   const audioDir = path.join('media', requestId, 'audio');
-  const mixedAudioDir = path.join('media', requestId, 'audio', 'mixed');
   const textDir = path.join('media', requestId, 'text');
-  const musicPath = path.join(audioDir, 'music.mp3');
   const clips = [];
-
-  logToJob(jobId, `Building edit spec for ${numSlides} slides`);
 
   for (let i = 0; i < numSlides; i++) {
     const imagePath = path.join(imageDir, `${i}.jpg`);
     const voiceAudioPath = path.join(audioDir, `${i}.mp3`);
-    const mixedAudioPath = path.join(mixedAudioDir, `${i}.mp3`);
     const textPath = path.join(textDir, `${i}.json`);
 
     let imageExists = false;
@@ -238,20 +207,14 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       await fs.access(imagePath);
       imageExists = true;
-    } catch (e) {
-      logToJob(jobId, `Image missing for slide ${i}`, 'error');
-    }
+    } catch (e) {}
     
     try {
       await fs.access(voiceAudioPath);
       voiceExists = true;
-    } catch (e) {
-      logToJob(jobId, `Voice audio missing for slide ${i}`, 'warn');
-    }
+    } catch (e) {}
 
-    if (!imageExists) {
-      continue;
-    }
+    if (!imageExists) continue;
 
     let textLayer = null;
     try {
@@ -266,82 +229,52 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           fontFamily: 'Arial'
         };
       }
-    } catch (e) {
-      logToJob(jobId, `Text missing for slide ${i}`, 'warn');
-    }
+    } catch (e) {}
 
     let clipDuration = 4;
-    let finalAudioPath = null;
-    
     if (voiceExists) {
       const audioDuration = await getAudioDuration(voiceAudioPath);
-      if (audioDuration > 0) {
-        clipDuration = audioDuration;
-        
-        const mixSuccess = await createAudioMix(voiceAudioPath, musicPath, mixedAudioPath, clipDuration, jobId);
-        
-        if (mixSuccess) {
-          finalAudioPath = mixedAudioPath;
-          logToJob(jobId, `Using mixed audio for slide ${i} (${clipDuration.toFixed(2)}s)`);
-        }
-      }
+      if (audioDuration > 0) clipDuration = audioDuration;
     }
 
-    const layers = [
-      { type: 'image', path: imagePath }
-    ];
-
-    if (textLayer) {
-      layers.push(textLayer);
-    }
+    const layers = [{ type: 'image', path: imagePath }];
+    if (textLayer) layers.push(textLayer);
 
     const clipConfig = {
       layers,
-      duration: clipDuration
+      duration: clipDuration,
+      voiceAudio: voiceExists ? voiceAudioPath : null
     };
-
-    if (finalAudioPath) {
-      clipConfig.audioPath = finalAudioPath;
-    }
 
     clips.push(clipConfig);
   }
 
-  if (clips.length === 0) {
-    throw new Error('No valid clips were created');
-  }
+  if (clips.length === 0) throw new Error('No valid clips created');
 
+  const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
   const outPath = path.join('media', requestId, 'video', 'final.mp4');
 
-  const spec = {
+  const editlySpec = {
     outPath,
     width: 1280,
     height: 720,
     fps: 30,
-    clips,
-    defaults: {
-      transition: { name: 'fade', duration: 0.5 }
-    },
-    audioCodec: 'aac',
-    audioBitrate: '128k',
-    audioSampleRate: 44100,
-    audioChannels: 2
+    clips: clips.map(clip => ({
+      layers: clip.layers,
+      duration: clip.duration
+    })),
+    defaults: { transition: { name: 'fade', duration: 0.5 } },
+    audioFilePath: masterAudioPath,
+    keepSourceAudio: false
   };
 
-  const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
-  logToJob(jobId, `Total video duration: ${totalDuration.toFixed(2)}s`);
-
-  return spec;
+  return editlySpec;
 };
 
 const cleanupFiles = async (requestId) => {
   try {
-    const mediaPath = path.join('media', requestId);
-    await fs.rm(mediaPath, { recursive: true, force: true });
-    console.log(`Cleaned up files for request: ${requestId}`);
-  } catch (error) {
-    console.warn(`Failed to cleanup files: ${error.message}`);
-  }
+    await fs.rm(path.join('media', requestId), { recursive: true, force: true });
+  } catch (error) {}
 };
 
 app.post('/register-job', async (req, res) => {
@@ -358,16 +291,11 @@ app.post('/register-job', async (req, res) => {
     JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
     res.json({ success: true, jobId });
 
-    logToJob(jobId, `Job started for request ${requestId}`);
-
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
     const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
     
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
-    
-    if (successfulSlides === 0) {
-      throw new Error('No slides with images were downloaded');
-    }
+    if (successfulSlides === 0) throw new Error('No slides downloaded');
     
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
     
@@ -375,10 +303,7 @@ app.post('/register-job', async (req, res) => {
     logToJob(jobId, 'Starting video creation...');
     
     await editly(spec);
-    logToJob(jobId, 'Video creation completed!');
-    
-    const stats = await fs.stat(spec.outPath);
-    logToJob(jobId, `Video file size: ${Math.round(stats.size / (1024 * 1024) * 100) / 100}MB`);
+    logToJob(jobId, 'Video created!');
     
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
     const uploadResult = await uploadVideoToSupabase(spec.outPath, requestId, jobId);
@@ -388,20 +313,14 @@ app.post('/register-job', async (req, res) => {
       success: true,
       requestId,
       videoUrl: uploadResult.publicUrl,
-      videoPath: uploadResult.path,
-      videoSize: uploadResult.size,
       timestamp: new Date().toISOString()
     };
 
-    const webhookResponse = await fetch(webhookUrl, {
+    await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(webhookPayload)
     });
-
-    if (!webhookResponse.ok) {
-      logToJob(jobId, `Webhook response not OK: ${webhookResponse.status}`, 'warn');
-    }
 
     JOBS.set(jobId, { 
       status: 'completed', 
@@ -409,37 +328,19 @@ app.post('/register-job', async (req, res) => {
       requestId,
       videoUrl: uploadResult.publicUrl 
     });
-    logToJob(jobId, `Job completed! Video: ${uploadResult.publicUrl}`);
 
     setTimeout(() => cleanupFiles(requestId), 30000);
 
   } catch (err) {
-    console.error(`Job ${jobId} failed:`, err.message);
-    
-    logToJob(jobId, `Job failed: ${err.message}`, 'error');
-    
-    JOBS.set(jobId, { 
-      status: 'failed', 
-      error: err.message,
-      createdAt: new Date(),
-      requestId 
-    });
+    JOBS.set(jobId, { status: 'failed', error: err.message, createdAt: new Date(), requestId });
     
     try {
       await fetch(webhookUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          jobId, 
-          success: false, 
-          error: err.message,
-          requestId,
-          timestamp: new Date().toISOString()
-        })
+        body: JSON.stringify({ jobId, success: false, error: err.message, requestId, timestamp: new Date().toISOString() })
       });
-    } catch (webhookError) {
-      console.error('Failed to send error webhook:', webhookError.message);
-    }
+    } catch (webhookError) {}
 
     setTimeout(() => cleanupFiles(requestId), 5000);
   }
@@ -448,13 +349,8 @@ app.post('/register-job', async (req, res) => {
 app.get('/check-job/:jobId', (req, res) => {
   const job = JOBS.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  
   const logs = JOB_LOGS.get(req.params.jobId) || [];
-  res.json({
-    ...job,
-    logs: logs.slice(-10),
-    totalLogs: logs.length
-  });
+  res.json({ ...job, logs: logs.slice(-10), totalLogs: logs.length });
 });
 
 app.get('/job-logs/:jobId', (req, res) => {
@@ -464,34 +360,21 @@ app.get('/job-logs/:jobId', (req, res) => {
 
 app.get('/video-url/:requestId', (req, res) => {
   const { requestId } = req.params;
-  
   for (const [jobId, job] of JOBS.entries()) {
     if (job.requestId === requestId && job.status === 'completed' && job.videoUrl) {
-      return res.json({
-        success: true,
-        videoUrl: job.videoUrl,
-        requestId,
-        jobId
-      });
+      return res.json({ success: true, videoUrl: job.videoUrl, requestId, jobId });
     }
   }
-  
-  res.status(404).json({ error: 'Video not found or not ready' });
+  res.status(404).json({ error: 'Video not found' });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    timestamp: new Date().toISOString(),
-    activeJobs: JOBS.size,
-    nodeVersion: process.version
-  });
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), activeJobs: JOBS.size });
 });
 
 setInterval(() => {
   const now = Date.now();
   const maxAge = 10 * 60 * 1000;
-  
   for (const [jobId, job] of JOBS.entries()) {
     if (now - job.createdAt.getTime() > maxAge) {
       JOBS.delete(jobId);
@@ -501,6 +384,5 @@ setInterval(() => {
 }, 10 * 60 * 1000);
 
 app.listen(port, () => {
-  console.log(`Editly server running on port ${port}`);
-  console.log(`Health check: http://localhost:${port}/health`);
+  console.log(`Server running on port ${port}`);
 });
