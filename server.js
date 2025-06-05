@@ -248,16 +248,12 @@ try {
   text: textData.text,
   position: textData.position || 'center',
   color: textData.color || 'white',
-  fontSize: textData.fontSize || 36,
+  fontSize: textData.fontSize || 48,
   fontFamily: 'Arial',
-  // Правильный способ добавить анимацию в editly
-  start: 0.2,  // Задержка появления
-  duration: clipDuration - 0.2,
-  // Или используйте transition
-  transition: {
-    name: 'fadeIn',
-    duration: 0.5
-  }
+  // Добавляем fade-in эффект
+  start: 0,
+  stop: clipDuration,
+  mixVolume: 1
 };
   }
 } catch (e) {}
