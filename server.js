@@ -244,14 +244,21 @@ try {
   const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
   if (textData.text && textData.text.trim()) {
     textLayer = {
-      type: 'title',
-      text: textData.text,
-      position: textData.position || 'center',
-      color: textData.color || 'white',
-      fontSize: textData.fontSize || 48,
-      fontFamily: 'Arial',
-      textAnimation: 'slideInBottom'
-    };
+  type: 'title',
+  text: textData.text,
+  position: textData.position || 'center',
+  color: textData.color || 'white',
+  fontSize: textData.fontSize || 36,
+  fontFamily: 'Arial',
+  // Правильный способ добавить анимацию в editly
+  start: 0.2,  // Задержка появления
+  duration: clipDuration - 0.2,
+  // Или используйте transition
+  transition: {
+    name: 'fadeIn',
+    duration: 0.5
+  }
+};
   }
 } catch (e) {}
 
