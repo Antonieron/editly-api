@@ -240,23 +240,19 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     let textLayer = null;
-try {
-  const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
-  if (textData.text && textData.text.trim()) {
-    textLayer = {
-  type: 'title',
-  text: textData.text,
-  position: textData.position || 'center',
-  color: textData.color || 'white',
-  fontSize: textData.fontSize || 48,
-  fontFamily: 'Arial',
-  // Добавляем fade-in эффект
-  start: 0,
-  stop: clipDuration,
-  mixVolume: 1
-};
-  }
-} catch (e) {}
+    try {
+      const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
+      if (textData.text && textData.text.trim()) {
+        textLayer = {
+          type: 'title',
+          text: textData.text,
+          position: textData.position || 'center',
+          color: textData.color || 'white',
+          fontSize: textData.fontSize || 24,
+          fontFamily: 'Arial'
+        };
+      }
+    } catch (e) {}
 
 const layers = [{ type: 'image', path: imagePath }];
 if (textLayer) layers.push(textLayer);
