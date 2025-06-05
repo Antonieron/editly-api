@@ -1,4 +1,3 @@
-// enhanced server.js with FIXED audio support and duration measurement
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -32,8 +31,6 @@ const logToJob = (jobId, message, type = 'info') => {
   };
   JOB_LOGS.get(jobId).push(logEntry);
   
-  // Ограничиваем количество логов (последние 100)
-  const logs = JOB_LOGS.get(jobId);
   if (logs.length > 100) {
     logs.splice(0, logs.length - 100);
   }
@@ -50,14 +47,14 @@ const getAudioDuration = async (audioPath, jobId) => {
     
     if (isNaN(duration) || duration <= 0) {
       logToJob(jobId, `⚠️ Invalid audio duration for ${audioPath}: ${stdout.trim()}`, 'warn');
-      return 4; // Fallback to 4 seconds
+      return 4;
     }
     
     logToJob(jobId, `🎵 Audio duration: ${duration.toFixed(2)}s for ${path.basename(audioPath)}`);
     return duration;
   } catch (error) {
     logToJob(jobId, `❌ Failed to get audio duration for ${audioPath}: ${error.message}`, 'error');
-    return 4; // Fallback to 4 seconds
+    return 4;
   }
 };
 
@@ -72,7 +69,7 @@ const ensureDirs = async (requestId) => {
 // Функция для скачивания файла из Supabase
 const downloadFile = async (url, localPath, timeout = 30000) => {
   try {
-    console.log(`⬇️  Downloading: ${url}`);
+    console.log(`⬇️ Downloading: ${url}`);
     
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
@@ -117,7 +114,6 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
     slides: []
   };
   
-  // Скачиваем музыку
   if (music) {
     const musicUrl = `${supabaseBaseUrl}${music}`;
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
@@ -128,25 +124,20 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
     logToJob(jobId, 'No background music provided');
   }
   
-  // Скачиваем файлы для каждого слайда
   for (let i = 0; i < supabaseData.length; i++) {
     const slide = supabaseData[i];
     const slideResult = { index: i, image: false, audio: false, text: false };
     
     logToJob(jobId, `Processing slide ${i}:`);
     
-    // Скачиваем изображение
     if (slide.image) {
-      const imageUrl = `${supabaseBaseUrl}${slide.image}`;
-      const imagePath = path.join('media', requestId, 'images', `${i}.jpg`);
-      logToJob(jobId, `  - Image: ${imageUrl}`);
+      const imageUrl = `${supabaseBaseUrl}${slipToJob(jobId, `  - Image: ${imageUrl}`);
       slideResult.image = await downloadFile(imageUrl, imagePath);
       logToJob(jobId, `  - Image result: ${slideResult.image ? 'SUCCESS' : 'FAILED'}`);
     } else {
       logToJob(jobId, `  - Image: NOT PROVIDED`);
     }
     
-    // Скачиваем аудио
     if (slide.audio) {
       const audioUrl = `${supabaseBaseUrl}${slide.audio}`;
       const audioPath = path.join('media', requestId, 'audio', `${i}.mp3`);
@@ -157,7 +148,6 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
       logToJob(jobId, `  - Audio: NOT PROVIDED`);
     }
     
-    // Скачиваем текст
     if (slide.text) {
       const textUrl = `${supabaseBaseUrl}${slide.text}`;
       const textPath = path.join('media', requestId, 'text', `${i}.json`);
@@ -184,7 +174,6 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
     const videoSizeMB = Math.round(videoBuffer.length / (1024 * 1024) * 100) / 100;
     logToJob(jobId, `Uploading video: ${videoSizeMB}MB`);
     
-    // Загружаем через REST API
     const fileName = `${requestId}/final.mp4`;
     const uploadUrl = `${supabaseUrl}/storage/v1/object/videos/${fileName}`;
     
@@ -193,7 +182,7 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
       headers: {
         'Authorization': `Bearer ${supabaseKey}`,
         'Content-Type': 'video/mp4',
-        'x-upsert': 'true' // перезаписываем если файл уже существует
+        'x-upsert': 'true'
       },
       body: videoBuffer
     });
@@ -204,7 +193,6 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
       throw new Error(`Upload failed: ${response.status} - ${errorText}`);
     }
     
-    // Получаем публичную ссылку
     const publicUrl = `${supabaseUrl}/storage/v1/object/public/videos/${fileName}`;
     logToJob(jobId, `Video uploaded successfully: ${publicUrl}`);
     
@@ -214,7 +202,6 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
       publicUrl: publicUrl,
       size: videoBuffer.length
     };
-    
   } catch (error) {
     logToJob(jobId, `Failed to upload video: ${error.message}`, 'error');
     throw error;
@@ -234,7 +221,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     const audioPath = path.join(audioDir, `${i}.mp3`);
     const textPath = path.join(textDir, `${i}.json`);
 
-    // Проверяем существование файлов
     let imageExists = false;
     let audioExists = false;
     
@@ -259,7 +245,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       continue;
     }
 
-    // Читаем текстовый файл
     let textLayer = null;
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
@@ -278,13 +263,11 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       logToJob(jobId, `❌ Text file missing/invalid for slide ${i}`, 'warn');
     }
 
-    // Получаем длительность аудио если оно есть
-    let clipDuration = 4; // Default duration
+    let clipDuration = 4;
     if (audioExists) {
       clipDuration = await getAudioDuration(audioPath, jobId);
     }
 
-    // Создаем слои для клипа
     const layers = [
       { type: 'image', path: imagePath }
     ];
@@ -293,20 +276,17 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       layers.push(textLayer);
     }
 
-    // ИСПРАВЛЕНО: Правильная структура клипа с фиксированной длительностью
     const clipConfig = {
       layers,
-      duration: clipDuration // ВАЖНО: устанавливаем точную длительность
+      duration: clipDuration
     };
 
-    // Добавляем аудио как отдельную дорожку
     if (audioExists) {
       clipConfig.audioTracks = [{
         path: audioPath,
         start: 0,
-        mixVolume: 1.0 // Полная громкость для озвучки
+        mixVolume: 1.0
       }];
-      
       logToJob(jobId, `🔊 Audio track added for slide ${i} (${clipDuration.toFixed(2)}s)`);
     } else {
       logToJob(jobId, `⏱️ Silent slide ${i} (${clipDuration}s)`);
@@ -323,39 +303,32 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   const musicPath = path.join(audioDir, 'music.mp3');
   const outPath = path.join('media', requestId, 'video', 'final.mp4');
 
-  // Базовая конфигурация для editly
   const spec = {
     outPath,
     width: 854,
     height: 480,
     fps: 24,
     clips,
-    // Простые переходы для стабильности
     defaults: {
       transition: { name: 'fade', duration: 0.3 }
     },
-    // Включаем подробное логирование
     enableFfmpegLog: true,
     verbose: true,
-    // ВАЖНО: Отключаем нормализацию аудио чтобы сохранить исходную громкость
     audioNorm: {
       enable: false
     }
   };
 
-  // Проверяем и добавляем фоновую музыку
   let musicExists = false;
   try {
     await fs.access(musicPath);
     musicExists = true;
     logToJob(jobId, '🎵 Background music file found');
     
-    // Добавляем фоновую музыку как глобальную дорожку
     spec.audioTracks = [{
       path: musicPath,
-      mixVolume: 0.15, // Еще тише чтобы не заглушать голос
+      mixVolume: 0.15,
       start: 0,
-      // Зацикливаем музыку если видео длиннее
       cutFrom: 0
     }];
     
@@ -364,7 +337,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     logToJob(jobId, '❌ Background music file not found, proceeding without it', 'warn');
   }
 
-  // Подсчитаем общую длительность видео
   const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
   logToJob(jobId, `📊 Total video duration: ${totalDuration.toFixed(2)}s (${Math.round(totalDuration/60)}:${String(Math.round(totalDuration%60)).padStart(2, '0')})`);
 
@@ -373,7 +345,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   logToJob(jobId, `  - Background music: ${musicExists ? 'YES' : 'NO'}`);
   logToJob(jobId, `  - Output: ${outPath}`);
   
-  // Подробная информация о каждом клипе для отладки
   clips.forEach((clip, index) => {
     const hasAudio = clip.audioTracks && clip.audioTracks.length > 0;
     const hasText = clip.layers.some(layer => layer.type === 'title');
@@ -385,14 +356,48 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
 // Функция очистки временных файлов
 const cleanupFiles = async (requestId) => {
+  // Отключаем очистку для конкретного requestId
+  if (requestId === '85dca25d-fc8a-45df-81d2-7698b0364ea1') {
+    console.log(`🛑 Cleanup skipped for request: ${requestId}`);
+    return;
+  }
   try {
     const mediaPath = path.join('media', requestId);
     await fs.rm(mediaPath, { recursive: true, force: true });
-    console.log(`🗑️  Cleaned up files for request: ${requestId}`);
+    console.log(`🗑️ Cleaned up files for request: ${requestId}`);
   } catch (error) {
     console.warn(`Failed to cleanup files: ${error.message}`);
   }
 };
+
+// Эндпоинт для скачивания видео
+app.get('/download-video/:requestId', async (req, res) => {
+  const { requestId } = req.params;
+  const videoPath = path.join('media', requestId, 'video', 'final.mp4');
+
+  try {
+    // Проверяем существование файла
+    await fs.access(videoPath);
+    
+    // Проверяем размер файла
+    const stats = await fs.stat(videoPath);
+    const videoSizeMB = Math.round(stats.size / (1024 * 1024) * 100) / 100;
+    logToJob(requestId, `Downloading video: ${videoPath} (${videoSizeMB}MB)`);
+
+    // Устанавливаем заголовки для скачивания
+    res.setHeader('Content-Disposition', `attachment; filename="final_${requestId}.mp4"`);
+    res.setHeader('Content-Type', 'video/mp4');
+    
+    // Отправляем файл как поток
+    const videoStream = fs.createReadStream(videoPath);
+    videoStream.pipe(res);
+    
+    logToJob(requestId, `Video download started for ${requestId}`);
+  } catch (error) {
+    logToJob(requestId, `Error downloading video: ${error.message}`, 'error');
+    res.status(404).json({ error: 'Видео не найдено или уже удалено' });
+  }
+});
 
 app.post('/register-job', async (req, res) => {
   const { requestId, numSlides, webhookUrl, supabaseBaseUrl, supabaseData, music } = req.body;
@@ -417,12 +422,10 @@ app.post('/register-job', async (req, res) => {
     logToJob(jobId, `Slides to process: ${numSlides}`);
     logToJob(jobId, `Background music: ${music ? 'PROVIDED' : 'NOT PROVIDED'}`);
 
-    // Скачиваем все файлы из Supabase
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
     logToJob(jobId, 'Starting file downloads from Supabase');
     const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
     
-    // Проверяем что скачалось
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
     const slidesWithAudio = downloadResults.slides.filter(slide => slide.audio).length;
     
@@ -432,15 +435,12 @@ app.post('/register-job', async (req, res) => {
       throw new Error('No slides with images were downloaded successfully');
     }
     
-    // Обновляем статус
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
     logToJob(jobId, 'Downloads completed, starting video processing');
     
-    // Создаем видео
     const spec = await buildEditSpec(requestId, numSlides, jobId);
     logToJob(jobId, 'Starting video creation with editly...');
     
-    // Добавляем обработчик прогресса editly если возможно
     const editlyOptions = {
       ...spec,
       onProgress: (progress) => {
@@ -451,7 +451,6 @@ app.post('/register-job', async (req, res) => {
     await editly(editlyOptions);
     logToJob(jobId, '🎉 Video creation completed successfully!');
     
-    // Проверяем что файл действительно создался
     try {
       const stats = await fs.stat(spec.outPath);
       logToJob(jobId, `Video file size: ${Math.round(stats.size / (1024 * 1024) * 100) / 100}MB`);
@@ -459,11 +458,9 @@ app.post('/register-job', async (req, res) => {
       throw new Error('Video file was not created successfully');
     }
     
-    // Загружаем видео в Supabase
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
     const uploadResult = await uploadVideoToSupabase(spec.outPath, requestId, jobId);
     
-    // Подготавливаем данные для webhook
     const webhookPayload = {
       jobId,
       success: true,
@@ -479,7 +476,6 @@ app.post('/register-job', async (req, res) => {
       }
     };
 
-    // Отправляем результат через webhook
     logToJob(jobId, 'Sending webhook with video URL');
     const webhookResponse = await fetch(webhookUrl, {
       method: 'POST',
@@ -501,9 +497,8 @@ app.post('/register-job', async (req, res) => {
     });
     logToJob(jobId, `🎊 Job completed successfully! Video: ${uploadResult.publicUrl}`);
 
-    // Очищаем временные файлы (теперь можно быстрее, так как видео уже в облаке)
-    setTimeout(() => cleanupFiles(requestId), 30000); // 30 секунд
-
+    // Очищаем файлы, но пропускаем для requestId 85dca25d-fc8a-45df-81d2-7698b0364ea1
+    setTimeout(() => cleanupFiles(requestId), 30000);
   } catch (err) {
     console.error(`💥 Job ${jobId} failed:`, err.message);
     console.error('Stack trace:', err.stack);
@@ -536,7 +531,7 @@ app.post('/register-job', async (req, res) => {
       logToJob(jobId, `Failed to send error webhook: ${webhookError.message}`, 'error');
     }
 
-    // Очищаем временные файлы даже при ошибке
+    // Очищаем файлы, но пропускаем для requestId 85dca25d-fc8a-45df-81d2-7698b0364ea1
     setTimeout(() => cleanupFiles(requestId), 5000);
   }
 });
@@ -548,22 +543,19 @@ app.get('/check-job/:jobId', (req, res) => {
   const logs = JOB_LOGS.get(req.params.jobId) || [];
   res.json({
     ...job,
-    logs: logs.slice(-10), // Последние 10 логов
+    logs: logs.slice(-10),
     totalLogs: logs.length
   });
 });
 
-// Endpoint для получения всех логов
 app.get('/job-logs/:jobId', (req, res) => {
   const logs = JOB_LOGS.get(req.params.jobId) || [];
   res.json({ logs, total: logs.length });
 });
 
-// Endpoint для получения ссылки на видео
 app.get('/video-url/:requestId', (req, res) => {
   const { requestId } = req.params;
   
-  // Ищем завершенную задачу с этим requestId
   for (const [jobId, job] of JOBS.entries()) {
     if (job.requestId === requestId && job.status === 'completed' && job.videoUrl) {
       return res.json({
@@ -578,7 +570,6 @@ app.get('/video-url/:requestId', (req, res) => {
   res.status(404).json({ error: 'Video not found or not ready' });
 });
 
-// Endpoint для проверки здоровья сервиса
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
@@ -589,7 +580,6 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Endpoint для отладки - показать детали последней задачи
 app.get('/debug/last-job', (req, res) => {
   const jobs = Array.from(JOBS.entries()).sort((a, b) => b[1].createdAt - a[1].createdAt);
   if (jobs.length === 0) {
@@ -607,10 +597,9 @@ app.get('/debug/last-job', (req, res) => {
   });
 });
 
-// Очистка старых задач каждые 10 минут
 setInterval(() => {
   const now = Date.now();
-  const maxAge = 10 * 60 * 1000; // 10 минут
+  const maxAge = 10 * 60 * 1000;
   
   for (const [jobId, job] of JOBS.entries()) {
     if (now - job.createdAt.getTime() > maxAge) {
@@ -625,5 +614,5 @@ app.listen(port, () => {
   console.log(`🏥 Health check: http://localhost:${port}/health`);
   console.log(`🐛 Debug endpoint: http://localhost:${port}/debug/last-job`);
   console.log(`📊 Node.js version: ${process.version}`);
-  console.log(`☁️  Supabase URL: ${supabaseUrl}`);
+  console.log(`☁️ Supabase URL: ${supabaseUrl}`);
 });
