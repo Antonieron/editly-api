@@ -31,6 +31,7 @@ const logToJob = (jobId, message, type = 'info') => {
   };
   JOB_LOGS.get(jobId).push(logEntry);
   
+  const logs = JOB_LOGS.get(jobId); // Исправлено: добавлено определение logs
   if (logs.length > 100) {
     logs.splice(0, logs.length - 100);
   }
@@ -131,7 +132,9 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
     logToJob(jobId, `Processing slide ${i}:`);
     
     if (slide.image) {
-      const imageUrl = `${supabaseBaseUrl}${slipToJob(jobId, `  - Image: ${imageUrl}`);
+      const imageUrl = `${supabaseBaseUrl}${slide.image}`; // Исправлено: формируем imageUrl
+      const imagePath = path.join('media', requestId, 'images', `${i}.jpg`);
+      logToJob(jobId, `  - Image: ${imageUrl}`); // Исправлено: логируем отдельно
       slideResult.image = await downloadFile(imageUrl, imagePath);
       logToJob(jobId, `  - Image result: ${slideResult.image ? 'SUCCESS' : 'FAILED'}`);
     } else {
@@ -356,7 +359,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
 // Функция очистки временных файлов
 const cleanupFiles = async (requestId) => {
-  // Отключаем очистку для конкретного requestId
   if (requestId === '85dca25d-fc8a-45df-81d2-7698b0364ea1') {
     console.log(`🛑 Cleanup skipped for request: ${requestId}`);
     return;
@@ -376,19 +378,15 @@ app.get('/download-video/:requestId', async (req, res) => {
   const videoPath = path.join('media', requestId, 'video', 'final.mp4');
 
   try {
-    // Проверяем существование файла
     await fs.access(videoPath);
     
-    // Проверяем размер файла
     const stats = await fs.stat(videoPath);
     const videoSizeMB = Math.round(stats.size / (1024 * 1024) * 100) / 100;
     logToJob(requestId, `Downloading video: ${videoPath} (${videoSizeMB}MB)`);
 
-    // Устанавливаем заголовки для скачивания
     res.setHeader('Content-Disposition', `attachment; filename="final_${requestId}.mp4"`);
     res.setHeader('Content-Type', 'video/mp4');
     
-    // Отправляем файл как поток
     const videoStream = fs.createReadStream(videoPath);
     videoStream.pipe(res);
     
@@ -497,7 +495,6 @@ app.post('/register-job', async (req, res) => {
     });
     logToJob(jobId, `🎊 Job completed successfully! Video: ${uploadResult.publicUrl}`);
 
-    // Очищаем файлы, но пропускаем для requestId 85dca25d-fc8a-45df-81d2-7698b0364ea1
     setTimeout(() => cleanupFiles(requestId), 30000);
   } catch (err) {
     console.error(`💥 Job ${jobId} failed:`, err.message);
@@ -531,7 +528,6 @@ app.post('/register-job', async (req, res) => {
       logToJob(jobId, `Failed to send error webhook: ${webhookError.message}`, 'error');
     }
 
-    // Очищаем файлы, но пропускаем для requestId 85dca25d-fc8a-45df-81d2-7698b0364ea1
     setTimeout(() => cleanupFiles(requestId), 5000);
   }
 });
