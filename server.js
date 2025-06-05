@@ -35,7 +35,6 @@ const getAudioDuration = async (audioPath) => {
   }
 };
 
-// НОВЫЙ ПОДХОД: Сначала создаем мастер-аудио, потом видео без звука, затем объединяем
 const createMasterAudio = async (requestId, clips, jobId) => {
   try {
     const masterAudioPath = path.join('media', requestId, 'audio', 'master.wav');
@@ -47,121 +46,66 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       hasMusic = true;
       logToJob(jobId, 'Background music found');
     } catch (e) {
-      logToJob(jobId, 'No background music found');
+      logToJob(jobId, 'No background music');
     }
     
-    const voiceFiles = clips.filter(clip => clip.voiceAudio).map(clip => clip.voiceAudio);
-    
-    if (voiceFiles.length === 0 && !hasMusic) {
-      logToJob(jobId, 'No audio files found', 'warning');
-      return null;
-    }
-    
-    // Создаем временный список для concat
-    const concatListPath = path.join('media', requestId, 'audio', 'concat_list.txt');
-    const silencePaths = [];
-    const audioSegments = [];
+    const audioInputs = [];
+    const filterParts = [];
+    let inputIndex = 0;
     
     let currentTime = 0;
-    
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
       
       if (clip.voiceAudio) {
-        // Добавляем тишину если нужно
-        if (currentTime > 0) {
-          const silencePath = path.join('media', requestId, 'audio', `silence_${i}.wav`);
-          await execAsync(`ffmpeg -y -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${currentTime} "${silencePath}"`);
-          silencePaths.push(silencePath);
-          audioSegments.push(`file '${path.basename(silencePath)}'`);
-        }
-        
-        audioSegments.push(`file '${path.basename(clip.voiceAudio)}'`);
-        currentTime = 0; // Сбрасываем, так как добавили аудио
+        const audioDuration = await getAudioDuration(clip.voiceAudio);
+        audioInputs.push(`-i "${clip.voiceAudio}"`);
+        filterParts.push(`[${inputIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        inputIndex++;
+        currentTime += clip.duration;
       } else {
         currentTime += clip.duration;
       }
     }
     
-    // Если остались клипы без аудио в конце, добавляем тишину
-    if (currentTime > 0) {
-      const silencePath = path.join('media', requestId, 'audio', `silence_end.wav`);
-      await execAsync(`ffmpeg -y -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${currentTime} "${silencePath}"`);
-      silencePaths.push(silencePath);
-      audioSegments.push(`file '${path.basename(silencePath)}'`);
-    }
-    
-    if (audioSegments.length === 0) {
-      logToJob(jobId, 'No audio segments to process');
+    if (audioInputs.length === 0 && !hasMusic) {
+      logToJob(jobId, 'No audio to process');
       return null;
     }
     
-    // Записываем список для concat
-    await fs.writeFile(concatListPath, audioSegments.join('\n'));
-    
-    // Объединяем все аудио сегменты
-    const voiceOnlyPath = path.join('media', requestId, 'audio', 'voice_only.wav');
-    await execAsync(`cd "${path.dirname(concatListPath)}" && ffmpeg -y -f concat -safe 0 -i "${path.basename(concatListPath)}" -c copy "${path.basename(voiceOnlyPath)}"`);
-    
-    const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
+    const totalDuration = currentTime;
     
     if (hasMusic) {
-      // Микшируем голос с музыкой
-      logToJob(jobId, 'Mixing voice with background music');
-      const command = `ffmpeg -y -i "${voiceOnlyPath}" -i "${musicPath}" -filter_complex "[0:a]volume=1.0[voice];[1:a]volume=0.3,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music];[voice][music]amix=inputs=2:duration=longest:weights=1,0.3" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      audioInputs.push(`-i "${musicPath}"`);
+      filterParts.push(`[${inputIndex}:a]volume=0.3,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
+    }
+    
+    let command;
+    if (audioInputs.length > 0) {
+      const voiceInputs = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
+      const mixInputs = voiceInputs + (hasMusic ? '[music]' : '');
+      const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
+      
+      if (audioInputs.length === 1 && !hasMusic) {
+        command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      } else {
+        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+        command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      }
+      
+      logToJob(jobId, 'Creating master audio...');
       await execAsync(command);
-    } else {
-      // Только голос
-      logToJob(jobId, 'Using voice-only audio');
-      await execAsync(`ffmpeg -y -i "${voiceOnlyPath}" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`);
+      
+      await fs.access(masterAudioPath);
+      const stats = await fs.stat(masterAudioPath);
+      logToJob(jobId, `Master audio: ${Math.round(stats.size / 1024)}KB`);
+      return masterAudioPath;
     }
     
-    // Очищаем временные файлы
-    for (const silencePath of silencePaths) {
-      try { await fs.unlink(silencePath); } catch (e) {}
-    }
-    try { await fs.unlink(concatListPath); } catch (e) {}
-    try { await fs.unlink(voiceOnlyPath); } catch (e) {}
-    
-    // Проверяем результат
-    await fs.access(masterAudioPath);
-    const stats = await fs.stat(masterAudioPath);
-    const audioDuration = await getAudioDuration(masterAudioPath);
-    
-    logToJob(jobId, `Master audio created: ${Math.round(stats.size / 1024)}KB, ${audioDuration.toFixed(2)}s`);
-    return masterAudioPath;
-    
-  } catch (error) {
-    logToJob(jobId, `Master audio creation failed: ${error.message}`, 'error');
-    console.error('Master audio error:', error);
     return null;
-  }
-};
-
-// Новая функция для добавления аудио к готовому видео
-const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
-  try {
-    logToJob(jobId, 'Adding audio to video with FFmpeg');
-    
-    // Получаем длительность видео
-    const { stdout: videoInfo } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`);
-    const videoDuration = parseFloat(videoInfo.trim());
-    
-    // Добавляем аудио к видео, обрезая аудио по длительности видео
-    const command = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -ar 44100 -ac 2 -t ${videoDuration} -map 0:v:0 -map 1:a:0 "${outputPath}"`;
-    
-    logToJob(jobId, `FFmpeg command: ${command}`);
-    await execAsync(command);
-    
-    // Проверяем результат
-    await fs.access(outputPath);
-    const stats = await fs.stat(outputPath);
-    logToJob(jobId, `Final video with audio created: ${Math.round(stats.size / 1024 / 1024)}MB`);
-    
-    return true;
   } catch (error) {
-    logToJob(jobId, `Failed to add audio to video: ${error.message}`, 'error');
-    return false;
+    logToJob(jobId, `Audio creation failed: ${error.message}`, 'error');
+    return null;
   }
 };
 
@@ -199,11 +143,10 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
   const results = { music: false, slides: [] };
   
   if (music) {
-    logToJob(jobId, `Downloading background music: ${music}`);
+    logToJob(jobId, `Downloading music: ${music}`);
     const musicUrl = `${supabaseBaseUrl}${music}`;
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
     results.music = await downloadFile(musicUrl, musicPath);
-    logToJob(jobId, `Music download: ${results.music ? 'success' : 'failed'}`);
   }
   
   for (let i = 0; i < supabaseData.length; i++) {
@@ -217,24 +160,19 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
     }
     
     if (slide.audio) {
-      logToJob(jobId, `Downloading audio for slide ${i}: ${slide.audio}`);
       const audioUrl = `${supabaseBaseUrl}${slide.audio}`;
       const audioPath = path.join('media', requestId, 'audio', `${i}.mp3`);
       slideResult.audio = await downloadFile(audioUrl, audioPath);
       
-      // Конвертируем в WAV для лучшей совместимости
       if (slideResult.audio) {
         const wavPath = path.join('media', requestId, 'audio', `${i}.wav`);
         try {
           await execAsync(`ffmpeg -y -i "${audioPath}" -c:a pcm_s16le -ar 44100 -ac 2 "${wavPath}"`);
-          await fs.unlink(audioPath); // Удаляем оригинальный MP3
-          logToJob(jobId, `Converted slide ${i} audio to WAV`);
+          await fs.unlink(audioPath);
         } catch (e) {
-          logToJob(jobId, `Failed to convert slide ${i} audio: ${e.message}`, 'error');
+          logToJob(jobId, `Audio convert failed for slide ${i}`, 'error');
         }
       }
-      
-      logToJob(jobId, `Slide ${i} audio download: ${slideResult.audio ? 'success' : 'failed'}`);
     }
     
     if (slide.text) {
@@ -265,7 +203,6 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
   });
   
   if (!response.ok) {
-    const errorText = await response.text();
     throw new Error(`Upload failed: ${response.status}`);
   }
   
@@ -281,7 +218,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
   for (let i = 0; i < numSlides; i++) {
     const imagePath = path.join(imageDir, `${i}.jpg`);
-    const voiceAudioPath = path.join(audioDir, `${i}.wav`); // Теперь ищем WAV
+    const voiceAudioPath = path.join(audioDir, `${i}.wav`);
     const textPath = path.join(textDir, `${i}.json`);
 
     let imageExists = false;
@@ -295,13 +232,10 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       await fs.access(voiceAudioPath);
       voiceExists = true;
-      logToJob(jobId, `Found voice audio for slide ${i}`);
-    } catch (e) {
-      logToJob(jobId, `No voice audio for slide ${i}`);
-    }
+    } catch (e) {}
 
     if (!imageExists) {
-      logToJob(jobId, `Skipping slide ${i} - no image found`);
+      logToJob(jobId, `Skip slide ${i} - no image`);
       continue;
     }
 
@@ -325,32 +259,25 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       const audioDuration = await getAudioDuration(voiceAudioPath);
       if (audioDuration > 0) {
         clipDuration = Math.max(audioDuration, 2);
-        logToJob(jobId, `Slide ${i} duration: ${clipDuration.toFixed(2)}s (from audio)`);
       }
-    } else {
-      logToJob(jobId, `Slide ${i} duration: ${clipDuration}s (default)`);
     }
 
     const layers = [{ type: 'image', path: imagePath }];
     if (textLayer) layers.push(textLayer);
 
-    const clipConfig = {
+    clips.push({
       layers,
       duration: clipDuration,
       voiceAudio: voiceExists ? voiceAudioPath : null
-    };
-
-    clips.push(clipConfig);
+    });
   }
 
-  if (clips.length === 0) throw new Error('No valid clips created');
+  if (clips.length === 0) throw new Error('No valid clips');
 
-  // ВАЖНО: Создаем видео БЕЗ звука через Editly
-  const silentVideoPath = path.join('media', requestId, 'video', 'silent.mp4');
   const finalVideoPath = path.join('media', requestId, 'video', 'final.mp4');
 
   const editlySpec = {
-    outPath: silentVideoPath, // Сначала создаем беззвучное видео
+    outPath: finalVideoPath,
     width: 1280,
     height: 720,
     fps: 30,
@@ -362,13 +289,32 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       transition: { name: 'fade', duration: 0.5 },
       layer: { resizeMode: 'contain' }
     },
-    keepSourceAudio: false, // Отключаем звук полностью
-    fast: false,
-    verbose: true
-    // НЕ добавляем audioFilePath - создаем беззвучное видео!
+    keepSourceAudio: false,
+    fast: false
   };
 
-  return { editlySpec, clips, silentVideoPath, finalVideoPath };
+  return { editlySpec, clips, finalVideoPath };
+};
+
+const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
+  try {
+    logToJob(jobId, 'Adding audio to video');
+    
+    const { stdout: videoInfo } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`);
+    const videoDuration = parseFloat(videoInfo.trim());
+    
+    const command = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -ar 44100 -ac 2 -shortest -map 0:v:0 -map 1:a:0 "${outputPath}"`;
+    
+    await execAsync(command);
+    
+    const stats = await fs.stat(outputPath);
+    logToJob(jobId, `Final video: ${Math.round(stats.size / 1024 / 1024)}MB`);
+    
+    return true;
+  } catch (error) {
+    logToJob(jobId, `Audio merge failed: ${error.message}`, 'error');
+    return false;
+  }
 };
 
 const cleanupFiles = async (requestId) => {
@@ -391,47 +337,34 @@ app.post('/register-job', async (req, res) => {
     JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
     res.json({ success: true, jobId });
 
-    logToJob(jobId, `Starting job for ${numSlides} slides`);
+    logToJob(jobId, `Processing ${numSlides} slides`);
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
     const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
     
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
     const audioSlides = downloadResults.slides.filter(slide => slide.audio).length;
     
-    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio files`);
+    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio`);
     
     if (successfulSlides === 0) throw new Error('No slides downloaded');
     
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
     
-    const { editlySpec, clips, silentVideoPath, finalVideoPath } = await buildEditSpec(requestId, numSlides, jobId);
+    const { editlySpec, clips, finalVideoPath } = await buildEditSpec(requestId, numSlides, jobId);
     
-    // ШАГ 1: Создаем мастер-аудио
-    logToJob(jobId, 'Creating master audio track...');
     const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
     
-    // ШАГ 2: Создаем беззвучное видео через Editly
-    logToJob(jobId, 'Creating silent video with Editly...');
-    await editly(editlySpec);
-    logToJob(jobId, 'Silent video created!');
-    
-    // ШАГ 3: Добавляем звук к видео через FFmpeg
     if (masterAudioPath) {
-      logToJob(jobId, 'Adding audio to video...');
-      const audioSuccess = await addAudioToVideo(silentVideoPath, masterAudioPath, finalVideoPath, jobId);
-      
-      if (!audioSuccess) {
-        logToJob(jobId, 'Audio merge failed, using silent video', 'warning');
-        await fs.copyFile(silentVideoPath, finalVideoPath);
-      }
-    } else {
-      logToJob(jobId, 'No audio track, using silent video');
-      await fs.copyFile(silentVideoPath, finalVideoPath);
+      editlySpec.audioFilePath = masterAudioPath;
+      editlySpec.keepSourceAudio = true;
     }
     
-    // Проверяем финальное видео
+    logToJob(jobId, 'Creating video with Editly');
+    await editly(editlySpec);
+    logToJob(jobId, 'Video created');
+    
     const videoStats = await fs.stat(finalVideoPath);
-    logToJob(jobId, `Final video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
+    logToJob(jobId, `Video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
     
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
     const uploadResult = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
@@ -457,11 +390,11 @@ app.post('/register-job', async (req, res) => {
       videoUrl: uploadResult.publicUrl 
     });
 
-    logToJob(jobId, `Job completed successfully: ${uploadResult.publicUrl}`);
+    logToJob(jobId, `Completed: ${uploadResult.publicUrl}`);
     setTimeout(() => cleanupFiles(requestId), 30000);
 
   } catch (err) {
-    logToJob(jobId, `Job failed: ${err.message}`, 'error');
+    logToJob(jobId, `Failed: ${err.message}`, 'error');
     JOBS.set(jobId, { status: 'failed', error: err.message, createdAt: new Date(), requestId });
     
     try {
