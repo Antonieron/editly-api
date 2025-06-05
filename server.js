@@ -44,12 +44,24 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     try {
       await fs.access(musicPath);
       hasMusic = true;
-    } catch (e) {}
+      logToJob(jobId, 'Background music found');
+    } catch (e) {
+      logToJob(jobId, 'No background music found');
+    }
+    
+    // Собираем все голосовые файлы
+    const voiceFiles = clips.filter(clip => clip.voiceAudio).map(clip => clip.voiceAudio);
+    
+    if (voiceFiles.length === 0 && !hasMusic) {
+      logToJob(jobId, 'No audio files found', 'warning');
+      return null;
+    }
     
     let filterComplex = '';
     let inputs = '';
     let currentTime = 0;
     
+    // Добавляем входные файлы
     for (let i = 0; i < clips.length; i++) {
       if (clips[i].voiceAudio) {
         inputs += ` -i "${clips[i].voiceAudio}"`;
@@ -60,41 +72,61 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       inputs += ` -i "${musicPath}"`;
     }
     
+    // Создаем временные задержки для голосовых файлов
     let voiceIndex = 0;
     for (let i = 0; i < clips.length; i++) {
       if (clips[i].voiceAudio) {
-        filterComplex += `[${voiceIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[v${i}];`;
+        const delayMs = Math.round(currentTime * 1000);
+        filterComplex += `[${voiceIndex}:a]adelay=${delayMs}|${delayMs}[voice${i}];`;
         voiceIndex++;
       }
       currentTime += clips[i].duration;
     }
     
+    // Собираем все голосовые дорожки для микширования
     let mixInputs = '';
     for (let i = 0; i < clips.length; i++) {
       if (clips[i].voiceAudio) {
-        mixInputs += `[v${i}]`;
+        mixInputs += `[voice${i}]`;
       }
     }
     
-    if (hasMusic) {
+    const totalDuration = currentTime;
+    
+    if (hasMusic && voiceFiles.length > 0) {
+      // Микшируем голос и музыку
       const musicIndex = voiceIndex;
-      filterComplex += `[${musicIndex}:a]volume=0.3,aloop=loop=-1:size=2e+09[bg];`;
-      filterComplex += `${mixInputs}[bg]amix=inputs=${voiceIndex + 1}:duration=longest`;
+      filterComplex += `[${musicIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[bg];`;
+      filterComplex += `${mixInputs}amix=inputs=${voiceFiles.length}:duration=longest:weights="1 1"[voices];`;
+      filterComplex += `[voices][bg]amix=inputs=2:duration=longest:weights="1 0.3"[final]`;
+    } else if (hasMusic) {
+      // Только музыка
+      const musicIndex = voiceIndex;
+      filterComplex += `[${musicIndex}:a]volume=0.5,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[final]`;
     } else {
-      filterComplex += `${mixInputs}amix=inputs=${voiceIndex}:duration=longest`;
+      // Только голос
+      filterComplex += `${mixInputs}amix=inputs=${voiceFiles.length}:duration=longest[final]`;
     }
     
-    const command = `ffmpeg -y${inputs} -filter_complex "${filterComplex}" -t ${currentTime} -c:a aac -b:a 128k -ar 44100 -ac 2 "${masterAudioPath}"`;
+    const command = `ffmpeg -y${inputs} -filter_complex "${filterComplex}" -map "[final]" -t ${totalDuration} -c:a aac -b:a 192k -ar 44100 -ac 2 "${masterAudioPath}"`;
     
-    logToJob(jobId, `Creating master audio: ${command}`);
+    logToJob(jobId, `Creating master audio with command: ${command}`);
     await execAsync(command);
     
+    // Проверяем, что файл создался
     await fs.access(masterAudioPath);
-    logToJob(jobId, 'Master audio created successfully');
+    const stats = await fs.stat(masterAudioPath);
+    logToJob(jobId, `Master audio created successfully (${Math.round(stats.size / 1024)}KB)`);
+    
+    // Проверяем длительность созданного аудио
+    const createdDuration = await getAudioDuration(masterAudioPath);
+    logToJob(jobId, `Master audio duration: ${createdDuration.toFixed(2)}s`);
+    
     return masterAudioPath;
     
   } catch (error) {
-    logToJob(jobId, `Master audio failed: ${error.message}`, 'error');
+    logToJob(jobId, `Master audio creation failed: ${error.message}`, 'error');
+    console.error('Master audio error:', error);
     return null;
   }
 };
@@ -133,9 +165,11 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
   const results = { music: false, slides: [] };
   
   if (music) {
+    logToJob(jobId, `Downloading background music: ${music}`);
     const musicUrl = `${supabaseBaseUrl}${music}`;
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
     results.music = await downloadFile(musicUrl, musicPath);
+    logToJob(jobId, `Music download: ${results.music ? 'success' : 'failed'}`);
   }
   
   for (let i = 0; i < supabaseData.length; i++) {
@@ -149,9 +183,11 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
     }
     
     if (slide.audio) {
+      logToJob(jobId, `Downloading audio for slide ${i}: ${slide.audio}`);
       const audioUrl = `${supabaseBaseUrl}${slide.audio}`;
       const audioPath = path.join('media', requestId, 'audio', `${i}.mp3`);
       slideResult.audio = await downloadFile(audioUrl, audioPath);
+      logToJob(jobId, `Slide ${i} audio download: ${slideResult.audio ? 'success' : 'failed'}`);
     }
     
     if (slide.text) {
@@ -212,9 +248,15 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       await fs.access(voiceAudioPath);
       voiceExists = true;
-    } catch (e) {}
+      logToJob(jobId, `Found voice audio for slide ${i}`);
+    } catch (e) {
+      logToJob(jobId, `No voice audio for slide ${i}`);
+    }
 
-    if (!imageExists) continue;
+    if (!imageExists) {
+      logToJob(jobId, `Skipping slide ${i} - no image found`);
+      continue;
+    }
 
     let textLayer = null;
     try {
@@ -234,7 +276,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     let clipDuration = 4;
     if (voiceExists) {
       const audioDuration = await getAudioDuration(voiceAudioPath);
-      if (audioDuration > 0) clipDuration = audioDuration;
+      if (audioDuration > 0) {
+        clipDuration = Math.max(audioDuration, 2); // Минимум 2 секунды
+        logToJob(jobId, `Slide ${i} duration: ${clipDuration.toFixed(2)}s (from audio)`);
+      }
+    } else {
+      logToJob(jobId, `Slide ${i} duration: ${clipDuration}s (default)`);
     }
 
     const layers = [{ type: 'image', path: imagePath }];
@@ -251,7 +298,9 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
   if (clips.length === 0) throw new Error('No valid clips created');
 
+  logToJob(jobId, `Created ${clips.length} clips, creating master audio...`);
   const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
+  
   const outPath = path.join('media', requestId, 'video', 'final.mp4');
 
   const editlySpec = {
@@ -263,10 +312,22 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       layers: clip.layers,
       duration: clip.duration
     })),
-    defaults: { transition: { name: 'fade', duration: 0.5 } },
-    audioFilePath: masterAudioPath,
-    keepSourceAudio: false
+    defaults: { 
+      transition: { name: 'fade', duration: 0.5 },
+      layer: { resizeMode: 'contain' }
+    },
+    keepSourceAudio: false, // Важно: отключаем исходный звук
+    fast: false, // Отключаем быстрый режим для лучшего качества
+    verbose: true
   };
+
+  // Добавляем master audio только если он создался
+  if (masterAudioPath) {
+    editlySpec.audioFilePath = masterAudioPath;
+    logToJob(jobId, `Using master audio: ${masterAudioPath}`);
+  } else {
+    logToJob(jobId, 'No master audio - video will be silent', 'warning');
+  }
 
   return editlySpec;
 };
@@ -291,19 +352,28 @@ app.post('/register-job', async (req, res) => {
     JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
     res.json({ success: true, jobId });
 
+    logToJob(jobId, `Starting job for ${numSlides} slides`);
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
     const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
     
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
+    const audioSlides = downloadResults.slides.filter(slide => slide.audio).length;
+    
+    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio files`);
+    
     if (successfulSlides === 0) throw new Error('No slides downloaded');
     
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
     
     const spec = await buildEditSpec(requestId, numSlides, jobId);
-    logToJob(jobId, 'Starting video creation...');
+    logToJob(jobId, 'Starting video creation with Editly...');
     
     await editly(spec);
-    logToJob(jobId, 'Video created!');
+    logToJob(jobId, 'Video created successfully!');
+    
+    // Проверяем финальное видео
+    const videoStats = await fs.stat(spec.outPath);
+    logToJob(jobId, `Final video size: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
     
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
     const uploadResult = await uploadVideoToSupabase(spec.outPath, requestId, jobId);
@@ -329,9 +399,11 @@ app.post('/register-job', async (req, res) => {
       videoUrl: uploadResult.publicUrl 
     });
 
+    logToJob(jobId, `Job completed successfully: ${uploadResult.publicUrl}`);
     setTimeout(() => cleanupFiles(requestId), 30000);
 
   } catch (err) {
+    logToJob(jobId, `Job failed: ${err.message}`, 'error');
     JOBS.set(jobId, { status: 'failed', error: err.message, createdAt: new Date(), requestId });
     
     try {
