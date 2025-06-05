@@ -60,7 +60,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        filterParts.push(`[${inputIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        filterParts.push(`[${inputIndex}:a]volume=1.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
       } else {
@@ -77,7 +77,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     
     if (hasMusic) {
       audioInputs.push(`-i "${musicPath}"`);
-      filterParts.push(`[${inputIndex}:a]volume=0.3,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
+      filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
     }
     
     let command;
@@ -248,7 +248,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           text: textData.text,
           position: textData.position || 'center',
           color: textData.color || 'white',
-          fontSize: textData.fontSize || 48,
+          fontSize: textData.fontSize || 24,
           fontFamily: 'Arial'
         };
       }
