@@ -262,7 +262,6 @@ try {
   }
 } catch (e) {}
 
-const layers = [{ type: 'image', path: imagePath }];
 
     let clipDuration = 4;
     if (voiceExists) {
