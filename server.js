@@ -35,9 +35,10 @@ const getAudioDuration = async (audioPath) => {
   }
 };
 
+// НОВЫЙ ПОДХОД: Сначала создаем мастер-аудио, потом видео без звука, затем объединяем
 const createMasterAudio = async (requestId, clips, jobId) => {
   try {
-    const masterAudioPath = path.join('media', requestId, 'audio', 'master.mp3');
+    const masterAudioPath = path.join('media', requestId, 'audio', 'master.wav');
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
     
     let hasMusic = false;
@@ -49,7 +50,6 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       logToJob(jobId, 'No background music found');
     }
     
-    // Собираем все голосовые файлы
     const voiceFiles = clips.filter(clip => clip.voiceAudio).map(clip => clip.voiceAudio);
     
     if (voiceFiles.length === 0 && !hasMusic) {
@@ -57,77 +57,111 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       return null;
     }
     
-    let filterComplex = '';
-    let inputs = '';
+    // Создаем временный список для concat
+    const concatListPath = path.join('media', requestId, 'audio', 'concat_list.txt');
+    const silencePaths = [];
+    const audioSegments = [];
+    
     let currentTime = 0;
     
-    // Добавляем входные файлы
     for (let i = 0; i < clips.length; i++) {
-      if (clips[i].voiceAudio) {
-        inputs += ` -i "${clips[i].voiceAudio}"`;
+      const clip = clips[i];
+      
+      if (clip.voiceAudio) {
+        // Добавляем тишину если нужно
+        if (currentTime > 0) {
+          const silencePath = path.join('media', requestId, 'audio', `silence_${i}.wav`);
+          await execAsync(`ffmpeg -y -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${currentTime} "${silencePath}"`);
+          silencePaths.push(silencePath);
+          audioSegments.push(`file '${path.basename(silencePath)}'`);
+        }
+        
+        audioSegments.push(`file '${path.basename(clip.voiceAudio)}'`);
+        currentTime = 0; // Сбрасываем, так как добавили аудио
+      } else {
+        currentTime += clip.duration;
       }
     }
+    
+    // Если остались клипы без аудио в конце, добавляем тишину
+    if (currentTime > 0) {
+      const silencePath = path.join('media', requestId, 'audio', `silence_end.wav`);
+      await execAsync(`ffmpeg -y -f lavfi -i anullsrc=channel_layout=stereo:sample_rate=44100 -t ${currentTime} "${silencePath}"`);
+      silencePaths.push(silencePath);
+      audioSegments.push(`file '${path.basename(silencePath)}'`);
+    }
+    
+    if (audioSegments.length === 0) {
+      logToJob(jobId, 'No audio segments to process');
+      return null;
+    }
+    
+    // Записываем список для concat
+    await fs.writeFile(concatListPath, audioSegments.join('\n'));
+    
+    // Объединяем все аудио сегменты
+    const voiceOnlyPath = path.join('media', requestId, 'audio', 'voice_only.wav');
+    await execAsync(`cd "${path.dirname(concatListPath)}" && ffmpeg -y -f concat -safe 0 -i "${path.basename(concatListPath)}" -c copy "${path.basename(voiceOnlyPath)}"`);
+    
+    const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
     
     if (hasMusic) {
-      inputs += ` -i "${musicPath}"`;
-    }
-    
-    // Создаем временные задержки для голосовых файлов
-    let voiceIndex = 0;
-    for (let i = 0; i < clips.length; i++) {
-      if (clips[i].voiceAudio) {
-        const delayMs = Math.round(currentTime * 1000);
-        filterComplex += `[${voiceIndex}:a]adelay=${delayMs}|${delayMs}[voice${i}];`;
-        voiceIndex++;
-      }
-      currentTime += clips[i].duration;
-    }
-    
-    // Собираем все голосовые дорожки для микширования
-    let mixInputs = '';
-    for (let i = 0; i < clips.length; i++) {
-      if (clips[i].voiceAudio) {
-        mixInputs += `[voice${i}]`;
-      }
-    }
-    
-    const totalDuration = currentTime;
-    
-    if (hasMusic && voiceFiles.length > 0) {
-      // Микшируем голос и музыку
-      const musicIndex = voiceIndex;
-      filterComplex += `[${musicIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[bg];`;
-      filterComplex += `${mixInputs}amix=inputs=${voiceFiles.length}:duration=longest:weights="1 1"[voices];`;
-      filterComplex += `[voices][bg]amix=inputs=2:duration=longest:weights="1 0.3"[final]`;
-    } else if (hasMusic) {
-      // Только музыка
-      const musicIndex = voiceIndex;
-      filterComplex += `[${musicIndex}:a]volume=0.5,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[final]`;
+      // Микшируем голос с музыкой
+      logToJob(jobId, 'Mixing voice with background music');
+      const command = `ffmpeg -y -i "${voiceOnlyPath}" -i "${musicPath}" -filter_complex "[0:a]volume=1.0[voice];[1:a]volume=0.3,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music];[voice][music]amix=inputs=2:duration=longest:weights=1,0.3" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      await execAsync(command);
     } else {
       // Только голос
-      filterComplex += `${mixInputs}amix=inputs=${voiceFiles.length}:duration=longest[final]`;
+      logToJob(jobId, 'Using voice-only audio');
+      await execAsync(`ffmpeg -y -i "${voiceOnlyPath}" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`);
     }
     
-    const command = `ffmpeg -y${inputs} -filter_complex "${filterComplex}" -map "[final]" -t ${totalDuration} -c:a aac -b:a 192k -ar 44100 -ac 2 "${masterAudioPath}"`;
+    // Очищаем временные файлы
+    for (const silencePath of silencePaths) {
+      try { await fs.unlink(silencePath); } catch (e) {}
+    }
+    try { await fs.unlink(concatListPath); } catch (e) {}
+    try { await fs.unlink(voiceOnlyPath); } catch (e) {}
     
-    logToJob(jobId, `Creating master audio with command: ${command}`);
-    await execAsync(command);
-    
-    // Проверяем, что файл создался
+    // Проверяем результат
     await fs.access(masterAudioPath);
     const stats = await fs.stat(masterAudioPath);
-    logToJob(jobId, `Master audio created successfully (${Math.round(stats.size / 1024)}KB)`);
+    const audioDuration = await getAudioDuration(masterAudioPath);
     
-    // Проверяем длительность созданного аудио
-    const createdDuration = await getAudioDuration(masterAudioPath);
-    logToJob(jobId, `Master audio duration: ${createdDuration.toFixed(2)}s`);
-    
+    logToJob(jobId, `Master audio created: ${Math.round(stats.size / 1024)}KB, ${audioDuration.toFixed(2)}s`);
     return masterAudioPath;
     
   } catch (error) {
     logToJob(jobId, `Master audio creation failed: ${error.message}`, 'error');
     console.error('Master audio error:', error);
     return null;
+  }
+};
+
+// Новая функция для добавления аудио к готовому видео
+const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
+  try {
+    logToJob(jobId, 'Adding audio to video with FFmpeg');
+    
+    // Получаем длительность видео
+    const { stdout: videoInfo } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`);
+    const videoDuration = parseFloat(videoInfo.trim());
+    
+    // Добавляем аудио к видео, обрезая аудио по длительности видео
+    const command = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -ar 44100 -ac 2 -t ${videoDuration} -map 0:v:0 -map 1:a:0 "${outputPath}"`;
+    
+    logToJob(jobId, `FFmpeg command: ${command}`);
+    await execAsync(command);
+    
+    // Проверяем результат
+    await fs.access(outputPath);
+    const stats = await fs.stat(outputPath);
+    logToJob(jobId, `Final video with audio created: ${Math.round(stats.size / 1024 / 1024)}MB`);
+    
+    return true;
+  } catch (error) {
+    logToJob(jobId, `Failed to add audio to video: ${error.message}`, 'error');
+    return false;
   }
 };
 
@@ -187,6 +221,19 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
       const audioUrl = `${supabaseBaseUrl}${slide.audio}`;
       const audioPath = path.join('media', requestId, 'audio', `${i}.mp3`);
       slideResult.audio = await downloadFile(audioUrl, audioPath);
+      
+      // Конвертируем в WAV для лучшей совместимости
+      if (slideResult.audio) {
+        const wavPath = path.join('media', requestId, 'audio', `${i}.wav`);
+        try {
+          await execAsync(`ffmpeg -y -i "${audioPath}" -c:a pcm_s16le -ar 44100 -ac 2 "${wavPath}"`);
+          await fs.unlink(audioPath); // Удаляем оригинальный MP3
+          logToJob(jobId, `Converted slide ${i} audio to WAV`);
+        } catch (e) {
+          logToJob(jobId, `Failed to convert slide ${i} audio: ${e.message}`, 'error');
+        }
+      }
+      
       logToJob(jobId, `Slide ${i} audio download: ${slideResult.audio ? 'success' : 'failed'}`);
     }
     
@@ -234,7 +281,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
   for (let i = 0; i < numSlides; i++) {
     const imagePath = path.join(imageDir, `${i}.jpg`);
-    const voiceAudioPath = path.join(audioDir, `${i}.mp3`);
+    const voiceAudioPath = path.join(audioDir, `${i}.wav`); // Теперь ищем WAV
     const textPath = path.join(textDir, `${i}.json`);
 
     let imageExists = false;
@@ -277,7 +324,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     if (voiceExists) {
       const audioDuration = await getAudioDuration(voiceAudioPath);
       if (audioDuration > 0) {
-        clipDuration = Math.max(audioDuration, 2); // Минимум 2 секунды
+        clipDuration = Math.max(audioDuration, 2);
         logToJob(jobId, `Slide ${i} duration: ${clipDuration.toFixed(2)}s (from audio)`);
       }
     } else {
@@ -298,13 +345,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
   if (clips.length === 0) throw new Error('No valid clips created');
 
-  logToJob(jobId, `Created ${clips.length} clips, creating master audio...`);
-  const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
-  
-  const outPath = path.join('media', requestId, 'video', 'final.mp4');
+  // ВАЖНО: Создаем видео БЕЗ звука через Editly
+  const silentVideoPath = path.join('media', requestId, 'video', 'silent.mp4');
+  const finalVideoPath = path.join('media', requestId, 'video', 'final.mp4');
 
   const editlySpec = {
-    outPath,
+    outPath: silentVideoPath, // Сначала создаем беззвучное видео
     width: 1280,
     height: 720,
     fps: 30,
@@ -316,20 +362,13 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       transition: { name: 'fade', duration: 0.5 },
       layer: { resizeMode: 'contain' }
     },
-    keepSourceAudio: false, // Важно: отключаем исходный звук
-    fast: false, // Отключаем быстрый режим для лучшего качества
+    keepSourceAudio: false, // Отключаем звук полностью
+    fast: false,
     verbose: true
+    // НЕ добавляем audioFilePath - создаем беззвучное видео!
   };
 
-  // Добавляем master audio только если он создался
-  if (masterAudioPath) {
-    editlySpec.audioFilePath = masterAudioPath;
-    logToJob(jobId, `Using master audio: ${masterAudioPath}`);
-  } else {
-    logToJob(jobId, 'No master audio - video will be silent', 'warning');
-  }
-
-  return editlySpec;
+  return { editlySpec, clips, silentVideoPath, finalVideoPath };
 };
 
 const cleanupFiles = async (requestId) => {
@@ -365,18 +404,37 @@ app.post('/register-job', async (req, res) => {
     
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
     
-    const spec = await buildEditSpec(requestId, numSlides, jobId);
-    logToJob(jobId, 'Starting video creation with Editly...');
+    const { editlySpec, clips, silentVideoPath, finalVideoPath } = await buildEditSpec(requestId, numSlides, jobId);
     
-    await editly(spec);
-    logToJob(jobId, 'Video created successfully!');
+    // ШАГ 1: Создаем мастер-аудио
+    logToJob(jobId, 'Creating master audio track...');
+    const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
+    
+    // ШАГ 2: Создаем беззвучное видео через Editly
+    logToJob(jobId, 'Creating silent video with Editly...');
+    await editly(editlySpec);
+    logToJob(jobId, 'Silent video created!');
+    
+    // ШАГ 3: Добавляем звук к видео через FFmpeg
+    if (masterAudioPath) {
+      logToJob(jobId, 'Adding audio to video...');
+      const audioSuccess = await addAudioToVideo(silentVideoPath, masterAudioPath, finalVideoPath, jobId);
+      
+      if (!audioSuccess) {
+        logToJob(jobId, 'Audio merge failed, using silent video', 'warning');
+        await fs.copyFile(silentVideoPath, finalVideoPath);
+      }
+    } else {
+      logToJob(jobId, 'No audio track, using silent video');
+      await fs.copyFile(silentVideoPath, finalVideoPath);
+    }
     
     // Проверяем финальное видео
-    const videoStats = await fs.stat(spec.outPath);
-    logToJob(jobId, `Final video size: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
+    const videoStats = await fs.stat(finalVideoPath);
+    logToJob(jobId, `Final video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
     
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
-    const uploadResult = await uploadVideoToSupabase(spec.outPath, requestId, jobId);
+    const uploadResult = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
     
     const webhookPayload = {
       jobId,
