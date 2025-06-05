@@ -60,7 +60,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        filterParts.push(`[${inputIndex}:a]volume=1.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        filterParts.push(`[${inputIndex}:a]volume=2.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
       } else {
@@ -76,9 +76,9 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     const totalDuration = currentTime;
     
     if (hasMusic) {
-      audioInputs.push(`-i "${musicPath}"`);
-      filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
-    }
+  audioInputs.push(`-i "${musicPath}"`);
+  filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=0:${totalDuration}[music]`);
+}
     
     let command;
     if (audioInputs.length > 0) {
@@ -89,7 +89,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (audioInputs.length === 1 && !hasMusic) {
   command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
 } else {
-  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest:weights=1 0.15[out]`;
+  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
   command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
 }
       
