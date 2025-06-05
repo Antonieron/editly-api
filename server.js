@@ -267,9 +267,7 @@ if (textLayer) layers.push(textLayer);
       }
     }
 
-    const layers = [{ type: 'image', path: imagePath }];
-    if (textLayer) layers.push(textLayer);
-
+    
     clips.push({
       layers,
       duration: clipDuration,
