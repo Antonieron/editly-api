@@ -87,11 +87,11 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
       
       if (audioInputs.length === 1 && !hasMusic) {
-        command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-      } else {
-        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
-        command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-      }
+  command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+} else {
+  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest:weights=1 0.15[out]`;
+  command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+}
       
       logToJob(jobId, 'Creating master audio...');
       await execAsync(command);
@@ -248,7 +248,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           text: textData.text,
           position: textData.position || 'center',
           color: textData.color || 'white',
-          fontSize: textData.fontSize || 24,
+          fontSize: textData.fontSize || 18,
           fontFamily: 'Arial'
         };
       }
