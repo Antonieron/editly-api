@@ -1,4 +1,4 @@
-// FIXED server.js with proper audio support for voice narration
+// ИСПРАВЛЕННЫЙ server.js с корректной обработкой звука
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -41,23 +41,57 @@ const logToJob = (jobId, message, type = 'info') => {
   console.log(`[${jobId.slice(-8)}] ${message}`);
 };
 
-// Функция для получения длительности аудиофайла через ffprobe
-const getAudioDuration = async (audioPath, jobId) => {
+// Функция для получения информации об аудиофайле
+const getAudioInfo = async (audioPath, jobId) => {
   try {
-    const command = `ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${audioPath}"`;
+    const command = `ffprobe -v quiet -print_format json -show_format -show_streams "${audioPath}"`;
     const { stdout } = await execAsync(command);
-    const duration = parseFloat(stdout.trim());
+    const info = JSON.parse(stdout);
     
-    if (isNaN(duration) || duration <= 0) {
-      logToJob(jobId, `⚠️ Invalid audio duration for ${audioPath}: ${stdout.trim()}`, 'warn');
-      return 4; // Fallback to 4 seconds
+    const audioStream = info.streams.find(s => s.codec_type === 'audio');
+    if (!audioStream) {
+      logToJob(jobId, `⚠️ No audio stream found in ${audioPath}`, 'warn');
+      return null;
     }
     
-    logToJob(jobId, `🎵 Audio duration: ${duration.toFixed(2)}s for ${path.basename(audioPath)}`);
-    return duration;
+    const duration = parseFloat(info.format.duration);
+    const bitrate = parseInt(info.format.bit_rate);
+    const sampleRate = parseInt(audioStream.sample_rate);
+    const channels = parseInt(audioStream.channels);
+    
+    logToJob(jobId, `🎵 Audio info for ${path.basename(audioPath)}:`);
+    logToJob(jobId, `  - Duration: ${duration.toFixed(2)}s`);
+    logToJob(jobId, `  - Bitrate: ${bitrate}bps`);
+    logToJob(jobId, `  - Sample rate: ${sampleRate}Hz`);
+    logToJob(jobId, `  - Channels: ${channels}`);
+    
+    return {
+      duration,
+      bitrate,
+      sampleRate,
+      channels,
+      hasAudio: true
+    };
   } catch (error) {
-    logToJob(jobId, `❌ Failed to get audio duration for ${audioPath}: ${error.message}`, 'error');
-    return 4; // Fallback to 4 seconds
+    logToJob(jobId, `❌ Failed to get audio info for ${audioPath}: ${error.message}`, 'error');
+    return null;
+  }
+};
+
+// Функция для нормализации аудио
+const normalizeAudio = async (inputPath, outputPath, jobId) => {
+  try {
+    logToJob(jobId, `🔧 Normalizing audio: ${path.basename(inputPath)}`);
+    
+    const command = `ffmpeg -y -i "${inputPath}" -af "volume=1.0,aresample=44100" -c:a aac -b:a 128k "${outputPath}"`;
+    
+    const { stdout, stderr } = await execAsync(command);
+    logToJob(jobId, `✅ Audio normalized successfully`);
+    
+    return true;
+  } catch (error) {
+    logToJob(jobId, `❌ Failed to normalize audio: ${error.message}`, 'error');
+    return false;
   }
 };
 
@@ -66,12 +100,21 @@ const createAudioMix = async (voiceAudioPath, backgroundMusicPath, outputPath, d
   try {
     logToJob(jobId, `🎛️ Creating audio mix: voice + background music`);
     
+    // Сначала нормализуем голосовое аудио
+    const normalizedVoicePath = outputPath.replace('.mp3', '_voice_norm.mp3');
+    const voiceNormalized = await normalizeAudio(voiceAudioPath, normalizedVoicePath, jobId);
+    
+    if (!voiceNormalized) {
+      logToJob(jobId, `❌ Failed to normalize voice, using original`, 'warn');
+      await fs.copyFile(voiceAudioPath, normalizedVoicePath);
+    }
+    
     let command = `ffmpeg -y `;
     
-    // Добавляем озвучку как основной аудио поток
-    command += `-i "${voiceAudioPath}" `;
+    // Добавляем нормализованную озвучку
+    command += `-i "${normalizedVoicePath}" `;
     
-    // Добавляем фоновую музыку если она есть
+    // Проверяем наличие фоновой музыки
     let hasBackgroundMusic = false;
     try {
       await fs.access(backgroundMusicPath);
@@ -83,40 +126,64 @@ const createAudioMix = async (voiceAudioPath, backgroundMusicPath, outputPath, d
     }
     
     if (hasBackgroundMusic) {
-      // Микшируем два аудио потока: голос (полная громкость) + музыка (тихо)
-      command += `-filter_complex "[0:a]volume=1.0[voice];[1:a]volume=0.1,aloop=loop=-1:size=2e+09[music];[voice][music]amix=inputs=2:duration=first:dropout_transition=2" `;
+      // Микшируем два аудио потока с правильными фильтрами
+      command += `-filter_complex "[0:a]volume=1.0[voice];[1:a]volume=0.15,aloop=loop=-1:size=2e+09[music];[voice][music]amix=inputs=2:duration=first:dropout_transition=0.5,aresample=44100" `;
     } else {
-      // Только голос
-      command += `-filter_complex "[0:a]volume=1.0" `;
+      // Только голос с ресемплингом
+      command += `-filter_complex "[0:a]volume=1.0,aresample=44100" `;
     }
     
-    // Обрезаем до нужной длительности и выводим
-    command += `-t ${duration} -c:a aac -b:a 128k "${outputPath}"`;
+    // Устанавливаем длительность и параметры вывода
+    command += `-t ${duration} -c:a aac -b:a 128k -ar 44100 -ac 2 "${outputPath}"`;
     
     logToJob(jobId, `🎛️ Audio mix command: ${command}`);
     
     const { stdout, stderr } = await execAsync(command);
-    logToJob(jobId, `✅ Audio mix created successfully`);
     
-    return true;
+    // Удаляем временный нормализованный файл
+    try {
+      await fs.unlink(normalizedVoicePath);
+    } catch (e) {
+      // Игнорируем ошибку удаления
+    }
+    
+    // Проверяем что выходной файл создался
+    try {
+      await fs.access(outputPath);
+      const audioInfo = await getAudioInfo(outputPath, jobId);
+      if (audioInfo && audioInfo.hasAudio) {
+        logToJob(jobId, `✅ Audio mix created successfully`);
+        return true;
+      } else {
+        throw new Error('Output file has no audio stream');
+      }
+    } catch (e) {
+      throw new Error(`Output file verification failed: ${e.message}`);
+    }
+    
   } catch (error) {
     logToJob(jobId, `❌ Failed to create audio mix: ${error.message}`, 'error');
-    // Если микширование не удалось, копируем просто голос
+    
+    // Fallback: копируем и нормализуем только голос
     try {
-      await fs.copyFile(voiceAudioPath, outputPath);
-      logToJob(jobId, `⚡ Fallback: copied voice audio only`);
-      return true;
-    } catch (copyError) {
-      logToJob(jobId, `❌ Failed to copy voice audio: ${copyError.message}`, 'error');
-      return false;
+      logToJob(jobId, `⚡ Fallback: creating normalized voice-only audio`);
+      const success = await normalizeAudio(voiceAudioPath, outputPath, jobId);
+      if (success) {
+        logToJob(jobId, `✅ Fallback successful`);
+        return true;
+      }
+    } catch (fallbackError) {
+      logToJob(jobId, `❌ Fallback failed: ${fallbackError.message}`, 'error');
     }
+    
+    return false;
   }
 };
 
 const ensureDirs = async (requestId) => {
   const base = path.join('media', requestId);
   await fs.mkdir(path.join(base, 'audio'), { recursive: true });
-  await fs.mkdir(path.join(base, 'audio', 'mixed'), { recursive: true }); // Папка для микшированного аудио
+  await fs.mkdir(path.join(base, 'audio', 'mixed'), { recursive: true });
   await fs.mkdir(path.join(base, 'images'), { recursive: true });
   await fs.mkdir(path.join(base, 'text'), { recursive: true });
   await fs.mkdir(path.join(base, 'video'), { recursive: true });
@@ -206,6 +273,15 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
       logToJob(jobId, `  - Audio: ${audioUrl}`);
       slideResult.audio = await downloadFile(audioUrl, audioPath);
       logToJob(jobId, `  - Audio result: ${slideResult.audio ? 'SUCCESS' : 'FAILED'}`);
+      
+      // Проверяем аудио файл после скачивания
+      if (slideResult.audio) {
+        const audioInfo = await getAudioInfo(audioPath, jobId);
+        if (!audioInfo || !audioInfo.hasAudio) {
+          logToJob(jobId, `  - Audio file is invalid or corrupted`, 'error');
+          slideResult.audio = false;
+        }
+      }
     } else {
       logToJob(jobId, `  - Audio: NOT PROVIDED`);
     }
@@ -336,14 +412,24 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
     // Получаем длительность аудио если оно есть
     let clipDuration = 4; // Default duration
+    let finalAudioPath = null;
+    
     if (voiceExists) {
-      clipDuration = await getAudioDuration(voiceAudioPath, jobId);
-      
-      // Создаем микс аудио (голос + фоновая музыка)
-      const mixSuccess = await createAudioMix(voiceAudioPath, musicPath, mixedAudioPath, clipDuration, jobId);
-      
-      if (!mixSuccess) {
-        logToJob(jobId, `❌ Failed to create audio mix for slide ${i}, using voice only`, 'warn');
+      const audioInfo = await getAudioInfo(voiceAudioPath, jobId);
+      if (audioInfo && audioInfo.hasAudio) {
+        clipDuration = audioInfo.duration;
+        
+        // Создаем микс аудио (голос + фоновая музыка)
+        const mixSuccess = await createAudioMix(voiceAudioPath, musicPath, mixedAudioPath, clipDuration, jobId);
+        
+        if (mixSuccess) {
+          finalAudioPath = mixedAudioPath;
+          logToJob(jobId, `🔊 Using mixed audio for slide ${i} (${clipDuration.toFixed(2)}s)`);
+        } else {
+          logToJob(jobId, `❌ Failed to create audio mix for slide ${i}, skipping audio`, 'error');
+        }
+      } else {
+        logToJob(jobId, `❌ Audio file for slide ${i} is invalid, skipping audio`, 'error');
       }
     }
 
@@ -362,24 +448,16 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       duration: clipDuration
     };
 
-    // ИСПРАВЛЕНО: Используем микшированное аудио если есть голос
-    if (voiceExists) {
-      try {
-        await fs.access(mixedAudioPath);
-        // Используем микшированное аудио
-        clipConfig.audioPath = mixedAudioPath;
-        logToJob(jobId, `🔊 Using mixed audio (voice + music) for slide ${i} (${clipDuration.toFixed(2)}s)`);
-      } catch (e) {
-        // Fallback на оригинальный голос
-        clipConfig.audioPath = voiceAudioPath;
-        logToJob(jobId, `🔊 Using voice-only audio for slide ${i} (${clipDuration.toFixed(2)}s)`);
-      }
+    // Добавляем аудио ТОЛЬКО если мы его успешно создали
+    if (finalAudioPath) {
+      clipConfig.audioPath = finalAudioPath;
+      logToJob(jobId, `🔊 Audio added to slide ${i}: ${path.basename(finalAudioPath)}`);
     } else {
       logToJob(jobId, `⏱️ Silent slide ${i} (${clipDuration}s)`);
     }
 
     clips.push(clipConfig);
-    logToJob(jobId, `Added slide ${i} to clips (${voiceExists ? 'with audio' : 'silent'}, ${clipDuration.toFixed(2)}s)`);
+    logToJob(jobId, `Added slide ${i} to clips (${finalAudioPath ? 'with audio' : 'silent'}, ${clipDuration.toFixed(2)}s)`);
   }
 
   if (clips.length === 0) {
@@ -391,23 +469,22 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   // Конфигурация для editly
   const spec = {
     outPath,
-    width: 854,
-    height: 480,
-    fps: 24,
+    width: 1280,
+    height: 720,
+    fps: 30,
     clips,
     // Простые переходы для стабильности
     defaults: {
-      transition: { name: 'fade', duration: 0.3 }
+      transition: { name: 'fade', duration: 0.5 }
     },
     // Включаем подробное логирование
     enableFfmpegLog: true,
     verbose: true,
-    // Включаем нормализацию аудио для лучшего качества
-    audioNorm: {
-      enable: true,
-      gaussSize: 5,
-      gaussSigma: 0.5
-    }
+    // Настройки для аудио
+    audioCodec: 'aac',
+    audioBitrate: '128k',
+    audioSampleRate: 44100,
+    audioChannels: 2
   };
 
   // Подсчитаем общую длительность видео
@@ -500,6 +577,14 @@ app.post('/register-job', async (req, res) => {
     try {
       const stats = await fs.stat(spec.outPath);
       logToJob(jobId, `Video file size: ${Math.round(stats.size / (1024 * 1024) * 100) / 100}MB`);
+      
+      // Проверяем что в видео есть аудио
+      const videoInfo = await getAudioInfo(spec.outPath, jobId);
+      if (videoInfo && videoInfo.hasAudio) {
+        logToJob(jobId, `✅ Video has audio track`);
+      } else {
+        logToJob(jobId, `⚠️ Video has no audio track`, 'warn');
+      }
     } catch (e) {
       throw new Error('Video file was not created successfully');
     }
