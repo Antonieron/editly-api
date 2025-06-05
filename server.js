@@ -240,19 +240,29 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     let textLayer = null;
-    try {
-      const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
-      if (textData.text && textData.text.trim()) {
-        textLayer = {
-          type: 'title',
-          text: textData.text,
-          position: textData.position || 'center',
-          color: textData.color || 'white',
-          fontSize: textData.fontSize || 18,
-          fontFamily: 'Arial'
-        };
-      }
-    } catch (e) {}
+try {
+  const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
+  if (textData.text && textData.text.trim()) {
+    const words = textData.text.split(' ');
+    const wordDuration = clipDuration / words.length;
+    
+    words.forEach((word, index) => {
+      layers.push({
+        type: 'title',
+        text: word,
+        position: { x: 0.1 + (index * 0.15), y: 0.5 },
+        color: textData.color || 'white',
+        fontSize: textData.fontSize || 48,
+        fontFamily: 'Arial',
+        start: index * wordDuration,
+        duration: wordDuration,
+        textAnimation: 'slideInBottom'
+      });
+    });
+  }
+} catch (e) {}
+
+const layers = [{ type: 'image', path: imagePath }];
 
     let clipDuration = 4;
     if (voiceExists) {
