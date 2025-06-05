@@ -326,9 +326,9 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   // Базовая конфигурация для editly
   const spec = {
     outPath,
-    width: 1280,
-    height: 720,
-    fps: 30,
+    width: 854,
+    height: 480,
+    fps: 24,
     clips,
     // Простые переходы для стабильности
     defaults: {
