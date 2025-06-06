@@ -60,8 +60,8 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        // FIXED: Apply volume boost only once per track, then delay
-        filterParts.push(`[${inputIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        // ИСПРАВЛЕНО: Применяем единую громкость 2.5 для всех голосовых дорожек
+        filterParts.push(`[${inputIndex}:a]volume=2.5,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
       } else {
@@ -78,7 +78,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     
     if (hasMusic) {
       audioInputs.push(`-i "${musicPath}"`);
-      // FIXED: Reduced music volume from 0.3 to 0.2 to give more space for voice
+      // Музыка остается на уровне 0.2
       filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
     }
     
@@ -89,20 +89,15 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
       
       if (audioInputs.length === 1 && !hasMusic) {
-        // FIXED: Added volume boost for single voice track
+        // Для одной дорожки применяем громкость 2.5
         command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.5" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       } else {
-        // FIXED: Apply volume boost to all voice tracks before mixing
-        const voiceBoostFilters = filterParts.filter(f => f.includes('voice')).map((filter, i) => 
-          filter.replace('[voice' + i + ']', `[voice${i}_temp];[voice${i}_temp]volume=2.5[voice${i}]`)
-        );
-        const musicFilters = filterParts.filter(f => f.includes('music'));
-        const allFilters = [...voiceBoostFilters, ...musicFilters];
-        const filterComplex = allFilters.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+        // ИСПРАВЛЕНО: Убираем дублирование усиления громкости
+        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
         command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       }
       
-      logToJob(jobId, 'Creating master audio with boosted voice volume...');
+      logToJob(jobId, 'Creating master audio with consistent voice volume...');
       await execAsync(command);
       
       await fs.access(masterAudioPath);
@@ -263,7 +258,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
         }
         
-        // Create scrolling subtitle effect
+        // ИСПРАВЛЕНО: Убран полупрозрачный фон
         textLayer = {
           type: 'subtitle',
           text: lines.join('\n'), // Multi-line text
@@ -271,9 +266,9 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           color: textData.color || '#FFFFFF',
           fontSize: '0.03', // Smaller font for subtitle style
           fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 2,
+          strokeWidth: 3, // Увеличена обводка для лучшей читаемости без фона
           strokeColor: '#000000',
-          backgroundColor: 'rgba(0,0,0,0.8)', // Dark background for readability
+          // УБРАНО: backgroundColor - теперь текст без фона
           padding: 15,
           // Subtitle-specific properties
           textAlign: 'center',
