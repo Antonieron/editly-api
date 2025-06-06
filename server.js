@@ -18,7 +18,7 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cC
 const JOBS = new Map();
 const JOB_LOGS = new Map();
 
-// Добавленные функции для улучшения обработки текста титров
+// Исправленные функции для обработки текста титров
 const getTextLines = (text, maxWordsPerLine) => {
   const words = text.split(' ');
   const lines = [];
@@ -28,10 +28,11 @@ const getTextLines = (text, maxWordsPerLine) => {
   return lines;
 };
 
+// Изменим размеры шрифта на числа, а не строки
 const getDynamicFontSize = (textLength) => {
-  if (textLength > 100) return '0.03';
-  if (textLength > 50) return '0.035';
-  return '0.04';
+  if (textLength > 100) return 20;  // уменьшаем для длинных текстов
+  if (textLength > 50) return 24;   // средний размер
+  return 28;                        // увеличенный размер для коротких текстов
 };
 
 const logToJob = (jobId, message, type = 'info') => {
@@ -261,28 +262,43 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       if (textData.text && textData.text.trim()) {
         const text = textData.text;
         const lines = getTextLines(text, 8);
-        const fontSize = getDynamicFontSize(text.length);
+        
+        // Используем fontSize из JSON или динамический размер
+        const fontSize = textData.fontSize || getDynamicFontSize(text.length);
+        
+        // Определяем позицию Y на основе position из JSON
+        let positionY = 0.85; // по умолчанию внизу
+        if (textData.position === 'top') {
+          positionY = 0.15;
+        } else if (textData.position === 'center' || textData.position === 'middle') {
+          positionY = 0.5;
+        }
 
+        // Исправленный слой титров с правильными параметрами
         textLayer = {
-          type: 'subtitle',
+          type: 'title',
           text: lines.join('\n'),
-          position: { x: 0.5, y: 0.85 },
-          color: textData.color || '#FFFFFF',
+          position: { 
+            x: 0.5, 
+            y: positionY
+          },
+          fontPath: null,  // используем системный шрифт
+          fontFamily: 'Arial Black',  // используем жирный шрифт для лучшей читаемости
           fontSize: fontSize,
-          fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 4,
-          strokeColor: '#000000',
+          color: textData.color || 'white',
+          strokeColor: 'black',
+          strokeWidth: 3,  // увеличиваем обводку для лучшей читаемости
           textAlign: 'center',
-          originX: 'center',
-          originY: 'center',
-          maxWidth: 0.9,
-          animation: {
-            type: 'fade',
-            duration: 1
-          }
+          // Добавляем параметры для лучшей видимости
+          backgroundColor: 'rgba(0, 0, 0, 0.5)',  // полупрозрачный черный фон
+          backgroundPadding: 0.02,
         };
+        
+        logToJob(jobId, `Added text layer for slide ${i}: fontSize=${fontSize}, position=${textData.position}, color=${textData.color}`);
       }
-    } catch (e) {}
+    } catch (e) {
+      logToJob(jobId, `Failed to load text for slide ${i}: ${e.message}`, 'warn');
+    }
 
     let clipDuration = 4;
     if (voiceExists) {
@@ -293,7 +309,9 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     const layers = [{ type: 'image', path: imagePath }];
-    if (textLayer) layers.push(textLayer);
+    if (textLayer) {
+      layers.push(textLayer);
+    }
 
     clips.push({
       layers,
@@ -320,8 +338,14 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       layer: { resizeMode: 'contain' }
     },
     keepSourceAudio: false,
-    fast: false
+    fast: false,
+    // Добавляем дополнительные параметры для обеспечения рендеринга текста
+    enableFfmpegLog: true,
+    verbose: true
   };
+
+  // Логируем спецификацию для отладки
+  logToJob(jobId, `Editly spec clips: ${clips.length}, with text: ${clips.filter(c => c.layers.some(l => l.type === 'title')).length}`);
 
   return { editlySpec, clips, finalVideoPath };
 };
@@ -373,8 +397,9 @@ app.post('/register-job', async (req, res) => {
 
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
     const audioSlides = downloadResults.slides.filter(slide => slide.audio).length;
+    const textSlides = downloadResults.slides.filter(slide => slide.text).length;
 
-    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio`);
+    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio, ${textSlides} texts`);
 
     if (successfulSlides === 0) throw new Error('No slides downloaded');
 
