@@ -259,6 +259,8 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     let textLayer = null;
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
+      logToJob(jobId, `Loaded text data for slide ${i}: ${JSON.stringify(textData)}`);
+      
       if (textData.text && textData.text.trim()) {
         const text = textData.text;
         const lines = getTextLines(text, 8);
@@ -274,30 +276,29 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           positionY = 0.5;
         }
 
-        // Исправленный слой титров с правильными параметрами
+        // Используем конфигурацию title слоя согласно документации editly
         textLayer = {
           type: 'title',
-          text: lines.join('\n'),
-          position: { 
-            x: 0.5, 
-            y: positionY
-          },
-          fontPath: null,  // используем системный шрифт
-          fontFamily: 'Arial Black',  // используем жирный шрифт для лучшей читаемости
-          fontSize: fontSize,
-          color: textData.color || 'white',
-          strokeColor: 'black',
-          strokeWidth: 3,  // увеличиваем обводку для лучшей читаемости
-          textAlign: 'center',
-          // Добавляем параметры для лучшей видимости
-          backgroundColor: 'rgba(0, 0, 0, 0.5)',  // полупрозрачный черный фон
-          backgroundPadding: 0.02,
+          text: text,
+          textColor: textData.color || 'white',
+          // position указывается как строка для title
+          position: textData.position || 'bottom',
+          // fontSize для title это относительное значение (0-1)
+          fontSize: (fontSize / 100), // преобразуем в диапазон 0-1
+          fontFamily: 'Arial',
+          // Добавляем zoomDirection для анимации появления
+          zoomDirection: null, // без зума
+          zoomAmount: 0,
         };
         
-        logToJob(jobId, `Added text layer for slide ${i}: fontSize=${fontSize}, position=${textData.position}, color=${textData.color}`);
+        logToJob(jobId, `Text layer created for slide ${i}: type=${textLayer.type}, position=${textLayer.position}, fontSize=${textLayer.fontSize}, text length=${text.length}`);
+        logToJob(jobId, `Text preview: "${text.substring(0, 50)}..."`);
+      } else {
+        logToJob(jobId, `No text or empty text for slide ${i}`);
       }
     } catch (e) {
-      logToJob(jobId, `Failed to load text for slide ${i}: ${e.message}`, 'warn');
+      logToJob(jobId, `Failed to load text for slide ${i}: ${e.message}`, 'error');
+      logToJob(jobId, `Text file path: ${textPath}`);
     }
 
     let clipDuration = 4;
@@ -311,6 +312,9 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     const layers = [{ type: 'image', path: imagePath }];
     if (textLayer) {
       layers.push(textLayer);
+      logToJob(jobId, `Slide ${i} has ${layers.length} layers (image + text)`);
+    } else {
+      logToJob(jobId, `Slide ${i} has ${layers.length} layer (image only)`);
     }
 
     clips.push({
@@ -345,7 +349,15 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   };
 
   // Логируем спецификацию для отладки
-  logToJob(jobId, `Editly spec clips: ${clips.length}, with text: ${clips.filter(c => c.layers.some(l => l.type === 'title')).length}`);
+  logToJob(jobId, `Editly spec: ${clips.length} clips total`);
+  clips.forEach((clip, index) => {
+    const hasText = clip.layers.some(l => l.type === 'title');
+    logToJob(jobId, `Clip ${index}: duration=${clip.duration}s, layers=${clip.layers.length}, hasText=${hasText}`);
+    if (hasText) {
+      const textLayer = clip.layers.find(l => l.type === 'title');
+      logToJob(jobId, `  Text: "${textLayer.text.substring(0, 30)}..." position=${textLayer.position}`);
+    }
+  });
 
   return { editlySpec, clips, finalVideoPath };
 };
