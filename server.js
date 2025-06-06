@@ -258,21 +258,19 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
         }
         
-        // ИСПРАВЛЕНО: Убран полупрозрачный фон
+        // ИСПРАВЛЕНО: Убран фон и изменено позиционирование
         textLayer = {
-          type: 'subtitle',
-          text: lines.join('\n'), // Multi-line text
-          position: 'bottom',
+          type: 'text',  // Изменено с 'subtitle' на 'text' для большего контроля
+          text: lines.join('\n'),
+          position: { x: 0.5, y: 0.75 }, // Центр по X, 75% по Y (нижняя половина)
           color: textData.color || '#FFFFFF',
-          fontSize: '0.03', // Smaller font for subtitle style
+          fontSize: '0.04', // Увеличен размер шрифта
           fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 3, // Увеличена обводка для лучшей читаемости без фона
+          strokeWidth: 4, // Увеличена обводка
           strokeColor: '#000000',
-          // УБРАНО: backgroundColor - теперь текст без фона
-          padding: 15,
-          // Subtitle-specific properties
           textAlign: 'center',
-          maxWidth: 0.95
+          maxWidth: 0.8, // 80% ширины экрана (отступы по 10% с каждой стороны)
+          // Убраны все параметры фона
         };
       }
     } catch (e) {}
