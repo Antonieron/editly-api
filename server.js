@@ -1,4 +1,13 @@
-import express from 'express';
+// Конфигурация для современной версии editly (0.14+)
+        textLayer = {
+          type: 'title-background',
+          text: text,
+          // Для title-background позиция указывается как строка
+          position: textData.position || 'bottom',
+          // Цвет текста
+          color: textData.color || 'white',
+          // Фон для лучшей читаемости
+          background: { type: 'radialGradient', colors: ['rgba(0,0,0,0.8import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
@@ -30,9 +39,10 @@ const getTextLines = (text, maxWordsPerLine) => {
 
 // Изменим размеры шрифта на числа, а не строки
 const getDynamicFontSize = (textLength) => {
-  if (textLength > 100) return 20;  // уменьшаем для длинных текстов
-  if (textLength > 50) return 24;   // средний размер
-  return 28;                        // увеличенный размер для коротких текстов
+  if (textLength > 200) return 0.15;  // очень маленький для очень длинных текстов
+  if (textLength > 100) return 0.2;   // маленький для длинных текстов
+  if (textLength > 50) return 0.25;   // средний размер
+  return 0.3;                         // нормальный размер для коротких текстов
 };
 
 const logToJob = (jobId, message, type = 'info') => {
@@ -263,10 +273,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       
       if (textData.text && textData.text.trim()) {
         const text = textData.text;
-        const lines = getTextLines(text, 8);
+        // Разбиваем текст на строки для длинных текстов
+        const lines = getTextLines(text, 6); // уменьшаем количество слов на строку
+        const formattedText = lines.slice(0, 4).join('\n'); // максимум 4 строки
         
         // Используем fontSize из JSON или динамический размер
-        const fontSize = textData.fontSize || getDynamicFontSize(text.length);
+        const fontSize = textData.fontSize ? (textData.fontSize / 100) : getDynamicFontSize(text.length);
         
         // Определяем позицию Y на основе position из JSON
         let positionY = 0.85; // по умолчанию внизу
@@ -279,20 +291,20 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
         // Используем конфигурацию title слоя согласно документации editly
         textLayer = {
           type: 'title',
-          text: text,
+          text: formattedText, // используем отформатированный текст с переносами
           textColor: textData.color || 'white',
           // position указывается как строка для title
           position: textData.position || 'bottom',
           // fontSize для title это относительное значение (0-1)
-          fontSize: (fontSize / 100), // преобразуем в диапазон 0-1
+          fontSize: fontSize,
           fontFamily: 'Arial',
           // Добавляем zoomDirection для анимации появления
           zoomDirection: null, // без зума
           zoomAmount: 0,
         };
         
-        logToJob(jobId, `Text layer created for slide ${i}: type=${textLayer.type}, position=${textLayer.position}, fontSize=${textLayer.fontSize}, text length=${text.length}`);
-        logToJob(jobId, `Text preview: "${text.substring(0, 50)}..."`);
+        logToJob(jobId, `Text layer created for slide ${i}: fontSize=${fontSize}, lines=${lines.length}, position=${textData.position}`);
+        logToJob(jobId, `Text preview: "${formattedText.substring(0, 50)}..."`);
       } else {
         logToJob(jobId, `No text or empty text for slide ${i}`);
       }
