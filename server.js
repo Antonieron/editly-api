@@ -244,34 +244,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     let textLayer = null;
+    let clipText = null;
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
-        const text = textData.text;
-        
-        // Split long text into multiple lines for better display
-        const words = text.split(' ');
-        const maxWordsPerLine = 8; // Adjust based on your needs
-        const lines = [];
-        
-        for (let i = 0; i < words.length; i += maxWordsPerLine) {
-          lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
-        }
-        
-        // ИСПРАВЛЕНО: Убран фон и изменено позиционирование
-        textLayer = {
-          type: 'text',  // Изменено с 'subtitle' на 'text' для большего контроля
-          text: lines.join('\n'),
-          position: { x: 0.5, y: 0.75 }, // Центр по X, 75% по Y (нижняя половина)
-          color: textData.color || '#FFFFFF',
-          fontSize: '0.04', // Увеличен размер шрифта
-          fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 4, // Увеличена обводка
-          strokeColor: '#000000',
-          textAlign: 'center',
-          maxWidth: 0.8, // 80% ширины экрана (отступы по 10% с каждой стороны)
-          // Убраны все параметры фона
-        };
+        clipText = textData.text; // Сохраняем текст для отдельной обработки через FFmpeg
+        // Не добавляем textLayer в editly - будем добавлять текст через FFmpeg
       }
     } catch (e) {}
 
@@ -284,12 +262,13 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     const layers = [{ type: 'image', path: imagePath }];
-    if (textLayer) layers.push(textLayer);
+    // Убираем добавление textLayer
 
     clips.push({
       layers,
       duration: clipDuration,
-      voiceAudio: voiceExists ? voiceAudioPath : null
+      voiceAudio: voiceExists ? voiceAudioPath : null,
+      text: clipText // Добавляем текст в clip для последующей обработки
     });
   }
 
@@ -317,7 +296,42 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   return { editlySpec, clips, finalVideoPath };
 };
 
-const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
+const addTextOverlay = async (videoPath, outputPath, clips, jobId) => {
+  try {
+    logToJob(jobId, 'Adding text overlays with FFmpeg');
+    
+    const filterParts = [];
+    let inputVideo = '[0:v]';
+    
+    for (let i = 0; i < clips.length; i++) {
+      const clip = clips[i];
+      if (clip.text) {
+        const startTime = clips.slice(0, i).reduce((sum, c) => sum + c.duration, 0);
+        const endTime = startTime + clip.duration;
+        
+        // Экранируем текст для FFmpeg
+        const escapedText = clip.text.replace(/'/g, "\\'").replace(/:/g, "\\:");
+        
+        const textFilter = `drawtext=text='${escapedText}':fontfile=/System/Library/Fonts/Arial.ttf:fontsize=32:fontcolor=white:borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.75-text_h/2:enable='between(t,${startTime},${endTime})'`;
+        
+        filterParts.push(textFilter);
+      }
+    }
+    
+    if (filterParts.length > 0) {
+      const command = `ffmpeg -y -i "${videoPath}" -vf "${filterParts.join(',')}" -c:a copy "${outputPath}"`;
+      await execAsync(command);
+      return true;
+    } else {
+      // Если нет текста, просто копируем файл
+      await execAsync(`cp "${videoPath}" "${outputPath}"`);
+      return true;
+    }
+  } catch (error) {
+    logToJob(jobId, `Text overlay failed: ${error.message}`, 'error');
+    return false;
+  }
+};
   try {
     logToJob(jobId, 'Adding audio to video');
     
@@ -384,11 +398,16 @@ app.post('/register-job', async (req, res) => {
     await editly(editlySpec);
     logToJob(jobId, 'Video created');
     
-    const videoStats = await fs.stat(finalVideoPath);
+    // Добавляем текст через FFmpeg после создания видео
+    const videoWithTextPath = path.join('media', requestId, 'video', 'with_text.mp4');
+    const textAdded = await addTextOverlay(finalVideoPath, videoWithTextPath, clips, jobId);
+    
+    const finalPath = textAdded ? videoWithTextPath : finalVideoPath;
+    const videoStats = await fs.stat(finalPath);
     logToJob(jobId, `Video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
     
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
-    const uploadResult = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
+    const uploadResult = await uploadVideoToSupabase(finalPath, requestId, jobId);
     
     const webhookPayload = {
       jobId,
