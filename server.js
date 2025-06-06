@@ -252,32 +252,26 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
-        const text = textData.text;
-        
-        // Split long text into multiple lines for better display
-        const words = text.split(' ');
-        const maxWordsPerLine = 8; // Adjust based on your needs
-        const lines = [];
-        
-        for (let i = 0; i < words.length; i += maxWordsPerLine) {
-          lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
-        }
-        
-        // Create scrolling subtitle effect
+        // FIXED: Create scrolling text like movie credits
         textLayer = {
-          type: 'subtitle',
-          text: lines.join('\n'), // Multi-line text
-          position: 'bottom',
+          type: 'title',
+          text: textData.text,
+          // Start from bottom and move up (like movie credits)
+          position: { 
+            x: 0.5, // Center horizontally
+            y: [1.2, -0.2] // Start below screen (1.2) and end above screen (-0.2)
+          },
           color: textData.color || '#FFFFFF',
-          fontSize: '0.03', // Smaller font for subtitle style
+          fontSize: '0.035', // Slightly smaller for better readability
           fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 2,
+          strokeWidth: 3,
           strokeColor: '#000000',
-          backgroundColor: 'rgba(0,0,0,0.8)', // Dark background for readability
-          padding: 15,
-          // Subtitle-specific properties
+          // Animation settings
+          animationStart: 0,
+          animationEnd: clipDuration,
+          // Text styling for better readability
           textAlign: 'center',
-          maxWidth: 0.95
+          maxWidth: 0.9 // Use 90% of screen width
         };
       }
     } catch (e) {}
@@ -290,15 +284,13 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       }
     }
 
-    // Remove text layer from editly - we'll add it later with FFmpeg
     const layers = [{ type: 'image', path: imagePath }];
-    // Don't add textLayer to editly - we'll handle text separately
-    
+    if (textLayer) layers.push(textLayer);
+
     clips.push({
       layers,
       duration: clipDuration,
-      voiceAudio: voiceExists ? voiceAudioPath : null,
-      textContent: textLayer ? textData.text : null // Store text for later processing
+      voiceAudio: voiceExists ? voiceAudioPath : null
     });
   }
 
@@ -326,37 +318,6 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   return { editlySpec, clips, finalVideoPath };
 };
 
-const addScrollingTextToVideo = async (videoPath, outputPath, textContent, duration, jobId) => {
-  try {
-    if (!textContent || textContent.trim() === '') {
-      // If no text, just copy the video
-      await execAsync(`ffmpeg -y -i "${videoPath}" -c copy "${outputPath}"`);
-      return true;
-    }
-
-    logToJob(jobId, 'Adding scrolling text overlay');
-    
-    // Escape text for FFmpeg
-    const escapedText = textContent.replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
-    
-    // Create scrolling text effect - text moves from right to left like a ticker
-    const textFilter = `drawtext=text='${escapedText}':fontfile=/System/Library/Fonts/Arial.ttf:fontsize=32:fontcolor=white:borderw=2:bordercolor=black:x=w-t*w/8:y=h-60:enable='between(t,0,${duration})'`;
-    
-    const command = `ffmpeg -y -i "${videoPath}" -vf "${textFilter}" -c:a copy "${outputPath}"`;
-    
-    await execAsync(command);
-    return true;
-  } catch (error) {
-    logToJob(jobId, `Text overlay failed: ${error.message}`, 'error');
-    // Fallback: copy original video
-    try {
-      await execAsync(`ffmpeg -y -i "${videoPath}" -c copy "${outputPath}"`);
-      return true;
-    } catch (fallbackError) {
-      return false;
-    }
-  }
-};
 const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
   try {
     logToJob(jobId, 'Adding audio to video');
@@ -376,7 +337,6 @@ const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
     logToJob(jobId, `Audio merge failed: ${error.message}`, 'error');
     return false;
   }
-};
 };
 
 const cleanupFiles = async (requestId) => {
@@ -423,29 +383,7 @@ app.post('/register-job', async (req, res) => {
     
     logToJob(jobId, 'Creating video with Editly');
     await editly(editlySpec);
-    logToJob(jobId, 'Video created, adding scrolling text');
-    
-    // Add scrolling text to each clip
-    const tempVideoPath = path.join('media', requestId, 'video', 'temp_no_text.mp4');
-    await fs.rename(finalVideoPath, tempVideoPath);
-    
-    // Combine all text content for scrolling
-    const allTextContent = clips
-      .filter(clip => clip.textContent)
-      .map(clip => clip.textContent)
-      .join(' • '); // Separate texts with bullet points
-    
-    const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
-    
-    // Add scrolling text overlay to the entire video
-    await addScrollingTextToVideo(tempVideoPath, finalVideoPath, allTextContent, totalDuration, jobId);
-    
-    // Clean up temp file
-    try {
-      await fs.unlink(tempVideoPath);
-    } catch (e) {}
-    
-    logToJob(jobId, 'Scrolling text added');
+    logToJob(jobId, 'Video created');
     
     const videoStats = await fs.stat(finalVideoPath);
     logToJob(jobId, `Video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
