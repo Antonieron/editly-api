@@ -1,4 +1,4 @@
-// server.js — обновлённый с нормальными субтитрами и исправленным createMasterAudio
+// server.js — обновлённый с улучшенными субтитрами и исправленным createMasterAudio
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -235,11 +235,15 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
           type: 'subtitle',
           text: textData.text,
           position: 'bottom',
+          margin: { bottom: 30 },
           textColor: textData.color || '#FFFFFF',
-          backgroundColor: 'rgba(0, 0, 0, 0.6)',
-          fontSize: textData.fontSize || 32,
+          backgroundColor: 'rgba(0, 0, 0, 0.7)',
+          fontSize: textData.fontSize || 28,
           fontFamily: 'Arial',
-          maxWidth: 0.8
+          align: 'center',
+          maxWidth: 0.9,
+          wrap: true,
+          padding: 10
         };
         logToJob(jobId, `Subtitle layer created for slide ${i}`);
       }
@@ -297,122 +301,4 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
 const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
   try {
-    logToJob(jobId, 'Adding audio to video');
-
-    const { stdout: videoInfo } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`);
-    const videoDuration = parseFloat(videoInfo.trim());
-
-    const command = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -ar 44100 -ac 2 -shortest -map 0:v:0 -map 1:a:0 "${outputPath}"`;
-
-    await execAsync(command);
-
-    const stats = await fs.stat(outputPath);
-    logToJob(jobId, `Final video: ${Math.round(stats.size / 1024 / 1024)}MB`);
-
-    return true;
-  } catch (error) {
-    logToJob(jobId, `Audio merge failed: ${error.message}`, 'error');
-    return false;
-  }
-};
-
-const cleanupFiles = async (requestId) => {
-  try {
-    await fs.rm(path.join('media', requestId), { recursive: true, force: true });
-  } catch (error) {}
-};
-
-app.post('/register-job', async (req, res) => {
-  const { requestId, numSlides, webhookUrl, supabaseBaseUrl, supabaseData, music } = req.body;
-
-  if (!requestId || !numSlides || !webhookUrl || !supabaseBaseUrl || !supabaseData) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
-  const jobId = uuidv4();
-
-  try {
-    await ensureDirs(requestId);
-    JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
-    res.json({ success: true, jobId });
-
-    logToJob(jobId, `Processing ${numSlides} slides`);
-    JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
-    const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
-
-    const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
-    const audioSlides = downloadResults.slides.filter(slide => slide.audio).length;
-    const textSlides = downloadResults.slides.filter(slide => slide.text).length;
-
-    logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio, ${textSlides} texts`);
-
-    if (successfulSlides === 0) throw new Error('No slides downloaded');
-
-    JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
-
-    const { editlySpec, clips, finalVideoPath } = await buildEditSpec(requestId, numSlides, jobId);
-
-    const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
-
-    if (masterAudioPath) {
-      editlySpec.audioFilePath = masterAudioPath;
-      editlySpec.keepSourceAudio = true;
-    }
-
-    logToJob(jobId, 'Creating video with Editly');
-    await editly(editlySpec);
-    logToJob(jobId, 'Video created');
-
-    const videoStats = await fs.stat(finalVideoPath);
-    logToJob(jobId, `Video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
-
-    JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
-    const uploadResult = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
-
-    const webhookPayload = {
-      jobId,
-      success: true,
-      requestId,
-      videoUrl: uploadResult.publicUrl,
-      timestamp: new Date().toISOString()
-    };
-
-    await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(webhookPayload)
-    });
-
-    JOBS.set(jobId, {
-      status: 'completed',
-      createdAt: new Date(),
-      requestId,
-      videoUrl: uploadResult.publicUrl
-    });
-
-    logToJob(jobId, `Completed: ${uploadResult.publicUrl}`);
-    setTimeout(() => cleanupFiles(requestId), 30000);
-
-  } catch (err) {
-    logToJob(jobId, `Failed: ${err.message}`, 'error');
-    JOBS.set(jobId, { status: 'failed', error: err.message, createdAt: new Date(), requestId });
-
-    try {
-      await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jobId, success: false, error: err.message, requestId, timestamp: new Date().toISOString() })
-      });
-    } catch (webhookError) {}
-
-    setTimeout(() => cleanupFiles(requestId), 5000);
-  }
-});
-
-app.get('/check-job/:jobId', (req, res) => {
-  const job = JOBS.get(req.params.jobId);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  const logs = JOB_LOGS.get(req.params.jobId) || [];
-  res.json({ ...job, logs: logs.slice(-10), totalLogs: logs.length });
-});
-
+    logToJob(jobId, '
