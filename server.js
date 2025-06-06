@@ -1,17 +1,4 @@
-// Используем конфигурацию title слоя согласно документации editly
-        textLayer = {
-          type: 'title',
-          text: formattedText, // используем отформатированный текст с переносами
-          textColor: textData.color || 'white',
-          // position указывается как строка для title
-          position: textData.position || 'bottom',
-          // fontSize для title это относительное значение (0-1)
-          fontSize: fontSize,
-          fontFamily: 'Arial',
-          // Добавляем zoomDirection для анимации появления
-          zoomDirection: null, // без зума
-          zoomAmount: 0,
-        };import express from 'express';
+import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs/promises';
@@ -30,24 +17,6 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cC
 
 const JOBS = new Map();
 const JOB_LOGS = new Map();
-
-// Исправленные функции для обработки текста титров
-const getTextLines = (text, maxWordsPerLine) => {
-  const words = text.split(' ');
-  const lines = [];
-  for (let i = 0; i < words.length; i += maxWordsPerLine) {
-    lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
-  }
-  return lines;
-};
-
-// Изменим размеры шрифта на числа, а не строки
-const getDynamicFontSize = (textLength) => {
-  if (textLength > 200) return 0.15;  // очень маленький для очень длинных текстов
-  if (textLength > 100) return 0.2;   // маленький для длинных текстов
-  if (textLength > 50) return 0.25;   // средний размер
-  return 0.3;                         // нормальный размер для коротких текстов
-};
 
 const logToJob = (jobId, message, type = 'info') => {
   if (!JOB_LOGS.has(jobId)) JOB_LOGS.set(jobId, []);
@@ -346,11 +315,11 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
   // Логируем спецификацию для отладки
   logToJob(jobId, `Editly spec: ${clips.length} clips total`);
   clips.forEach((clip, index) => {
-    const hasText = clip.layers.some(l => l.type === 'title');
+    const hasText = clip.layers.some(l => l.type === 'subtitle');
     logToJob(jobId, `Clip ${index}: duration=${clip.duration}s, layers=${clip.layers.length}, hasText=${hasText}`);
     if (hasText) {
-      const textLayer = clip.layers.find(l => l.type === 'title');
-      logToJob(jobId, `  Text: "${textLayer.text.substring(0, 30)}..." position=${textLayer.position}`);
+      const textLayer = clip.layers.find(l => l.type === 'subtitle');
+      logToJob(jobId, `  Text: "${textLayer.text.substring(0, 30)}..." color=${textLayer.textColor}`);
     }
   });
 
