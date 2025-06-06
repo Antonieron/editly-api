@@ -18,6 +18,22 @@ const supabaseKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cC
 const JOBS = new Map();
 const JOB_LOGS = new Map();
 
+// Добавленные функции для улучшения обработки текста титров
+const getTextLines = (text, maxWordsPerLine) => {
+  const words = text.split(' ');
+  const lines = [];
+  for (let i = 0; i < words.length; i += maxWordsPerLine) {
+    lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
+  }
+  return lines;
+};
+
+const getDynamicFontSize = (textLength) => {
+  if (textLength > 100) return '0.03';
+  if (textLength > 50) return '0.035';
+  return '0.04';
+};
+
 const logToJob = (jobId, message, type = 'info') => {
   if (!JOB_LOGS.has(jobId)) JOB_LOGS.set(jobId, []);
   JOB_LOGS.get(jobId).push({ timestamp: new Date().toISOString(), type, message });
@@ -39,7 +55,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
   try {
     const masterAudioPath = path.join('media', requestId, 'audio', 'master.wav');
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
-    
+
     let hasMusic = false;
     try {
       await fs.access(musicPath);
@@ -48,19 +64,18 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     } catch (e) {
       logToJob(jobId, 'No background music');
     }
-    
+
     const audioInputs = [];
     const filterParts = [];
     let inputIndex = 0;
-    
+
     let currentTime = 0;
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
-      
+
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        // ИСПРАВЛЕНО: Применяем единую громкость 2.5 для всех голосовых дорожек
         filterParts.push(`[${inputIndex}:a]volume=2.5,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
@@ -68,44 +83,41 @@ const createMasterAudio = async (requestId, clips, jobId) => {
         currentTime += clip.duration;
       }
     }
-    
+
     if (audioInputs.length === 0 && !hasMusic) {
       logToJob(jobId, 'No audio to process');
       return null;
     }
-    
+
     const totalDuration = currentTime;
-    
+
     if (hasMusic) {
       audioInputs.push(`-i "${musicPath}"`);
-      // Музыка остается на уровне 0.2
       filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
     }
-    
+
     let command;
     if (audioInputs.length > 0) {
       const voiceInputs = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
       const mixInputs = voiceInputs + (hasMusic ? '[music]' : '');
       const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
-      
+
       if (audioInputs.length === 1 && !hasMusic) {
-        // Для одной дорожки применяем громкость 2.5
         command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.5" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       } else {
-        // ИСПРАВЛЕНО: Убираем дублирование усиления громкости
         const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
         command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       }
-      
+
       logToJob(jobId, 'Creating master audio with consistent voice volume...');
       await execAsync(command);
-      
+
       await fs.access(masterAudioPath);
       const stats = await fs.stat(masterAudioPath);
       logToJob(jobId, `Master audio: ${Math.round(stats.size / 1024)}KB`);
       return masterAudioPath;
     }
-    
+
     return null;
   } catch (error) {
     logToJob(jobId, `Audio creation failed: ${error.message}`, 'error');
@@ -125,15 +137,15 @@ const downloadFile = async (url, localPath, timeout = 30000) => {
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeout);
-    
-    const response = await fetch(url, { 
+
+    const response = await fetch(url, {
       signal: controller.signal,
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; VideoProcessor/1.0)' }
     });
-    
+
     clearTimeout(timeoutId);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    
+
     const buffer = await response.buffer();
     await fs.writeFile(localPath, buffer);
     return true;
@@ -145,29 +157,29 @@ const downloadFile = async (url, localPath, timeout = 30000) => {
 
 const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music, jobId) => {
   const results = { music: false, slides: [] };
-  
+
   if (music) {
     logToJob(jobId, `Downloading music: ${music}`);
     const musicUrl = `${supabaseBaseUrl}${music}`;
     const musicPath = path.join('media', requestId, 'audio', 'music.mp3');
     results.music = await downloadFile(musicUrl, musicPath);
   }
-  
+
   for (let i = 0; i < supabaseData.length; i++) {
     const slide = supabaseData[i];
     const slideResult = { index: i, image: false, audio: false, text: false };
-    
+
     if (slide.image) {
       const imageUrl = `${supabaseBaseUrl}${slide.image}`;
       const imagePath = path.join('media', requestId, 'images', `${i}.jpg`);
       slideResult.image = await downloadFile(imageUrl, imagePath);
     }
-    
+
     if (slide.audio) {
       const audioUrl = `${supabaseBaseUrl}${slide.audio}`;
       const audioPath = path.join('media', requestId, 'audio', `${i}.mp3`);
       slideResult.audio = await downloadFile(audioUrl, audioPath);
-      
+
       if (slideResult.audio) {
         const wavPath = path.join('media', requestId, 'audio', `${i}.wav`);
         try {
@@ -178,16 +190,16 @@ const downloadAllFiles = async (requestId, supabaseBaseUrl, supabaseData, music,
         }
       }
     }
-    
+
     if (slide.text) {
       const textUrl = `${supabaseBaseUrl}${slide.text}`;
       const textPath = path.join('media', requestId, 'text', `${i}.json`);
       slideResult.text = await downloadFile(textUrl, textPath);
     }
-    
+
     results.slides.push(slideResult);
   }
-  
+
   return results;
 };
 
@@ -195,7 +207,7 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
   const videoBuffer = await fs.readFile(videoPath);
   const fileName = `${requestId}/final.mp4`;
   const uploadUrl = `${supabaseUrl}/storage/v1/object/videos/${fileName}`;
-  
+
   const response = await fetch(uploadUrl, {
     method: 'POST',
     headers: {
@@ -205,11 +217,11 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
     },
     body: videoBuffer
   });
-  
+
   if (!response.ok) {
     throw new Error(`Upload failed: ${response.status}`);
   }
-  
+
   const publicUrl = `${supabaseUrl}/storage/v1/object/public/videos/${fileName}`;
   return { success: true, path: fileName, publicUrl, size: videoBuffer.length };
 };
@@ -227,12 +239,12 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 
     let imageExists = false;
     let voiceExists = false;
-    
+
     try {
       await fs.access(imagePath);
       imageExists = true;
     } catch (e) {}
-    
+
     try {
       await fs.access(voiceAudioPath);
       voiceExists = true;
@@ -248,30 +260,26 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
         const text = textData.text;
-        
-        // Split long text into multiple lines for better display
-        const words = text.split(' ');
-        const maxWordsPerLine = 8; // Adjust based on your needs
-        const lines = [];
-        
-        for (let i = 0; i < words.length; i += maxWordsPerLine) {
-          lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
-        }
-        
-        // ОБНОВЛЕНО: Убрана вся прозрачность, текст по центру внизу экрана
+        const lines = getTextLines(text, 8);
+        const fontSize = getDynamicFontSize(text.length);
+
         textLayer = {
           type: 'subtitle',
-          text: lines.join('\n'), // Multi-line text
-          position: { x: 0.5, y: 0.85 }, // Центр по горизонтали (0.5), нижняя часть по вертикали (0.85)
-          color: textData.color || '#FFFFFF', // Полностью непрозрачный белый цвет
-          fontSize: '0.04', // Увеличен размер шрифта для лучшей читаемости
+          text: lines.join('\n'),
+          position: { x: 0.5, y: 0.85 },
+          color: textData.color || '#FFFFFF',
+          fontSize: fontSize,
           fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 4, // Увеличена обводка для контраста
-          strokeColor: '#000000', // Черная обводка без прозрачности
-          textAlign: 'center', // Центрирование текста
-          originX: 'center', // Центрирование по X
-          originY: 'center', // Центрирование по Y
-          maxWidth: 0.9 // Максимальная ширина текста 90% от экрана
+          strokeWidth: 4,
+          strokeColor: '#000000',
+          textAlign: 'center',
+          originX: 'center',
+          originY: 'center',
+          maxWidth: 0.9,
+          animation: {
+            type: 'fade',
+            duration: 1
+          }
         };
       }
     } catch (e) {}
@@ -307,7 +315,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       layers: clip.layers,
       duration: clip.duration
     })),
-    defaults: { 
+    defaults: {
       transition: { name: 'fade', duration: 0.5 },
       layer: { resizeMode: 'contain' }
     },
@@ -321,17 +329,17 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
 const addAudioToVideo = async (videoPath, audioPath, outputPath, jobId) => {
   try {
     logToJob(jobId, 'Adding audio to video');
-    
+
     const { stdout: videoInfo } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`);
     const videoDuration = parseFloat(videoInfo.trim());
-    
+
     const command = `ffmpeg -y -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac -b:a 192k -ar 44100 -ac 2 -shortest -map 0:v:0 -map 1:a:0 "${outputPath}"`;
-    
+
     await execAsync(command);
-    
+
     const stats = await fs.stat(outputPath);
     logToJob(jobId, `Final video: ${Math.round(stats.size / 1024 / 1024)}MB`);
-    
+
     return true;
   } catch (error) {
     logToJob(jobId, `Audio merge failed: ${error.message}`, 'error');
@@ -347,13 +355,13 @@ const cleanupFiles = async (requestId) => {
 
 app.post('/register-job', async (req, res) => {
   const { requestId, numSlides, webhookUrl, supabaseBaseUrl, supabaseData, music } = req.body;
-  
+
   if (!requestId || !numSlides || !webhookUrl || !supabaseBaseUrl || !supabaseData) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
   const jobId = uuidv4();
-  
+
   try {
     await ensureDirs(requestId);
     JOBS.set(jobId, { status: 'started', createdAt: new Date(), requestId });
@@ -362,35 +370,35 @@ app.post('/register-job', async (req, res) => {
     logToJob(jobId, `Processing ${numSlides} slides`);
     JOBS.set(jobId, { status: 'downloading', createdAt: new Date(), requestId });
     const downloadResults = await downloadAllFiles(requestId, supabaseBaseUrl, supabaseData, music, jobId);
-    
+
     const successfulSlides = downloadResults.slides.filter(slide => slide.image).length;
     const audioSlides = downloadResults.slides.filter(slide => slide.audio).length;
-    
+
     logToJob(jobId, `Downloaded ${successfulSlides} images, ${audioSlides} audio`);
-    
+
     if (successfulSlides === 0) throw new Error('No slides downloaded');
-    
+
     JOBS.set(jobId, { status: 'processing', createdAt: new Date(), requestId });
-    
+
     const { editlySpec, clips, finalVideoPath } = await buildEditSpec(requestId, numSlides, jobId);
-    
+
     const masterAudioPath = await createMasterAudio(requestId, clips, jobId);
-    
+
     if (masterAudioPath) {
       editlySpec.audioFilePath = masterAudioPath;
       editlySpec.keepSourceAudio = true;
     }
-    
+
     logToJob(jobId, 'Creating video with Editly');
     await editly(editlySpec);
     logToJob(jobId, 'Video created');
-    
+
     const videoStats = await fs.stat(finalVideoPath);
     logToJob(jobId, `Video ready: ${Math.round(videoStats.size / 1024 / 1024)}MB`);
-    
+
     JOBS.set(jobId, { status: 'uploading', createdAt: new Date(), requestId });
     const uploadResult = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
-    
+
     const webhookPayload = {
       jobId,
       success: true,
@@ -405,11 +413,11 @@ app.post('/register-job', async (req, res) => {
       body: JSON.stringify(webhookPayload)
     });
 
-    JOBS.set(jobId, { 
-      status: 'completed', 
-      createdAt: new Date(), 
+    JOBS.set(jobId, {
+      status: 'completed',
+      createdAt: new Date(),
       requestId,
-      videoUrl: uploadResult.publicUrl 
+      videoUrl: uploadResult.publicUrl
     });
 
     logToJob(jobId, `Completed: ${uploadResult.publicUrl}`);
@@ -418,7 +426,7 @@ app.post('/register-job', async (req, res) => {
   } catch (err) {
     logToJob(jobId, `Failed: ${err.message}`, 'error');
     JOBS.set(jobId, { status: 'failed', error: err.message, createdAt: new Date(), requestId });
-    
+
     try {
       await fetch(webhookUrl, {
         method: 'POST',
