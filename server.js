@@ -1,3 +1,4 @@
+// server.js — обновлённый с нормальными субтитрами и исправленным createMasterAudio
 import express from 'express';
 import fetch from 'node-fetch';
 import { v4 as uuidv4 } from 'uuid';
@@ -52,15 +53,14 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     const audioInputs = [];
     const filterParts = [];
     let inputIndex = 0;
-
     let currentTime = 0;
+
     for (let i = 0; i < clips.length; i++) {
       const clip = clips[i];
-
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        filterParts.push(`[${inputIndex}:a]volume=2.5,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        filterParts.push(`[${inputIndex}:a]volume=1.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
       } else {
@@ -74,35 +74,23 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     }
 
     const totalDuration = currentTime;
-
     if (hasMusic) {
       audioInputs.push(`-i "${musicPath}"`);
-      filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
+      filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=0:${totalDuration}[music]`);
     }
 
-    let command;
-    if (audioInputs.length > 0) {
-      const voiceInputs = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
-      const mixInputs = voiceInputs + (hasMusic ? '[music]' : '');
-      const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
+    const voiceTags = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
+    const mixInputs = voiceTags + (hasMusic ? '[music]' : '');
+    const mixCount = audioInputs.length;
+    const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+    const command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
 
-      if (audioInputs.length === 1 && !hasMusic) {
-        command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.5" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-      } else {
-        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
-        command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-      }
-
-      logToJob(jobId, 'Creating master audio with consistent voice volume...');
-      await execAsync(command);
-
-      await fs.access(masterAudioPath);
-      const stats = await fs.stat(masterAudioPath);
-      logToJob(jobId, `Master audio: ${Math.round(stats.size / 1024)}KB`);
-      return masterAudioPath;
-    }
-
-    return null;
+    logToJob(jobId, 'Creating master audio...');
+    await execAsync(command);
+    await fs.access(masterAudioPath);
+    const stats = await fs.stat(masterAudioPath);
+    logToJob(jobId, `Master audio: ${Math.round(stats.size / 1024)}KB`);
+    return masterAudioPath;
   } catch (error) {
     logToJob(jobId, `Audio creation failed: ${error.message}`, 'error');
     return null;
@@ -242,27 +230,21 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     let textLayer = null;
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
-      logToJob(jobId, `Loaded text data for slide ${i}: ${JSON.stringify(textData)}`);
-      
       if (textData.text && textData.text.trim()) {
-        const text = textData.text;
-        
-        // Для subtitle используем простую конфигурацию согласно документации
         textLayer = {
           type: 'subtitle',
-          text: text,
-          textColor: textData.color || '#ffffff',
-          // fontPath можно указать, если нужен кастомный шрифт
+          text: textData.text,
+          position: 'bottom',
+          textColor: textData.color || '#FFFFFF',
+          backgroundColor: 'rgba(0, 0, 0, 0.6)',
+          fontSize: textData.fontSize || 32,
+          fontFamily: 'Arial',
+          maxWidth: 0.8
         };
-        
-        logToJob(jobId, `Text layer created for slide ${i}: type=subtitle, color=${textData.color}`);
-        logToJob(jobId, `Text preview: "${text.substring(0, 50)}..."`);
-      } else {
-        logToJob(jobId, `No text or empty text for slide ${i}`);
+        logToJob(jobId, `Subtitle layer created for slide ${i}`);
       }
     } catch (e) {
-      logToJob(jobId, `Failed to load text for slide ${i}: ${e.message}`, 'error');
-      logToJob(jobId, `Text file path: ${textPath}`);
+      logToJob(jobId, `Failed to load or parse text for slide ${i}: ${e.message}`, 'error');
     }
 
     let clipDuration = 4;
@@ -274,12 +256,7 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     }
 
     const layers = [{ type: 'image', path: imagePath }];
-    if (textLayer) {
-      layers.push(textLayer);
-      logToJob(jobId, `Slide ${i} has ${layers.length} layers (image + text)`);
-    } else {
-      logToJob(jobId, `Slide ${i} has ${layers.length} layer (image only)`);
-    }
+    if (textLayer) layers.push(textLayer);
 
     clips.push({
       layers,
@@ -297,29 +274,21 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     width: 1280,
     height: 720,
     fps: 30,
-    clips: clips.map(clip => ({
-      layers: clip.layers,
-      duration: clip.duration
-    })),
-    defaults: {
-      transition: { name: 'fade', duration: 0.5 },
-      layer: { resizeMode: 'contain' }
-    },
+    clips: clips.map(clip => ({ layers: clip.layers, duration: clip.duration })),
+    defaults: { transition: { name: 'fade', duration: 0.5 }, layer: { resizeMode: 'contain' } },
     keepSourceAudio: false,
     fast: false,
-    // Добавляем дополнительные параметры для обеспечения рендеринга текста
     enableFfmpegLog: true,
     verbose: true
   };
 
-  // Логируем спецификацию для отладки
   logToJob(jobId, `Editly spec: ${clips.length} clips total`);
   clips.forEach((clip, index) => {
     const hasText = clip.layers.some(l => l.type === 'subtitle');
     logToJob(jobId, `Clip ${index}: duration=${clip.duration}s, layers=${clip.layers.length}, hasText=${hasText}`);
     if (hasText) {
-      const textLayer = clip.layers.find(l => l.type === 'subtitle');
-      logToJob(jobId, `  Text: "${textLayer.text.substring(0, 30)}..." color=${textLayer.textColor}`);
+      const sub = clip.layers.find(l => l.type === 'subtitle');
+      logToJob(jobId, `  Subtitle text: "${sub.text.substring(0, 30)}..."`);
     }
   });
 
@@ -447,36 +416,3 @@ app.get('/check-job/:jobId', (req, res) => {
   res.json({ ...job, logs: logs.slice(-10), totalLogs: logs.length });
 });
 
-app.get('/job-logs/:jobId', (req, res) => {
-  const logs = JOB_LOGS.get(req.params.jobId) || [];
-  res.json({ logs, total: logs.length });
-});
-
-app.get('/video-url/:requestId', (req, res) => {
-  const { requestId } = req.params;
-  for (const [jobId, job] of JOBS.entries()) {
-    if (job.requestId === requestId && job.status === 'completed' && job.videoUrl) {
-      return res.json({ success: true, videoUrl: job.videoUrl, requestId, jobId });
-    }
-  }
-  res.status(404).json({ error: 'Video not found' });
-});
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString(), activeJobs: JOBS.size });
-});
-
-setInterval(() => {
-  const now = Date.now();
-  const maxAge = 10 * 60 * 1000;
-  for (const [jobId, job] of JOBS.entries()) {
-    if (now - job.createdAt.getTime() > maxAge) {
-      JOBS.delete(jobId);
-      JOB_LOGS.delete(jobId);
-    }
-  }
-}, 10 * 60 * 1000);
-
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
