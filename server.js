@@ -252,26 +252,32 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
-        // FIXED: Create scrolling text like movie credits
+        const text = textData.text;
+        
+        // Split long text into multiple lines for better display
+        const words = text.split(' ');
+        const maxWordsPerLine = 8; // Adjust based on your needs
+        const lines = [];
+        
+        for (let i = 0; i < words.length; i += maxWordsPerLine) {
+          lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
+        }
+        
+        // Create scrolling subtitle effect
         textLayer = {
-          type: 'title',
-          text: textData.text,
-          // Start from bottom and move up (like movie credits)
-          position: { 
-            x: 0.5, // Center horizontally
-            y: [1.2, -0.2] // Start below screen (1.2) and end above screen (-0.2)
-          },
+          type: 'subtitle',
+          text: lines.join('\n'), // Multi-line text
+          position: 'bottom',
           color: textData.color || '#FFFFFF',
-          fontSize: '0.035', // Slightly smaller for better readability
+          fontSize: '0.03', // Smaller font for subtitle style
           fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 3,
+          strokeWidth: 2,
           strokeColor: '#000000',
-          // Animation settings
-          animationStart: 0,
-          animationEnd: clipDuration,
-          // Text styling for better readability
+          backgroundColor: 'rgba(0,0,0,0.8)', // Dark background for readability
+          padding: 15,
+          // Subtitle-specific properties
           textAlign: 'center',
-          maxWidth: 0.9 // Use 90% of screen width
+          maxWidth: 0.95
         };
       }
     } catch (e) {}
