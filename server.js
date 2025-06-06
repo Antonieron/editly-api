@@ -58,14 +58,15 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       const clip = clips[i];
       
       if (clip.voiceAudio) {
-  const audioDuration = await getAudioDuration(clip.voiceAudio);
-  audioInputs.push(`-i "${clip.voiceAudio}"`);
-  filterParts.push(`[${inputIndex}:a]volume=1.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
-  inputIndex++;
-  currentTime += clip.duration;
-} else {
-  currentTime += clip.duration;
-}
+        const audioDuration = await getAudioDuration(clip.voiceAudio);
+        audioInputs.push(`-i "${clip.voiceAudio}"`);
+        // FIXED: Increased voice volume from default to 2.0 (doubled)
+        filterParts.push(`[${inputIndex}:a]volume=2.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        inputIndex++;
+        currentTime += clip.duration;
+      } else {
+        currentTime += clip.duration;
+      }
     }
     
     if (audioInputs.length === 0 && !hasMusic) {
@@ -74,29 +75,28 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     }
     
     const totalDuration = currentTime;
-
-if (hasMusic) {
-  audioInputs.push(`-i "${musicPath}"`);
-  filterParts.push(
-    `[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=0:${totalDuration}[music]`
-  );
-}
-
+    
+    if (hasMusic) {
+      audioInputs.push(`-i "${musicPath}"`);
+      // FIXED: Reduced music volume from 0.3 to 0.2 to give more space for voice
+      filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[music]`);
+    }
     
     let command;
     if (audioInputs.length > 0) {
-      const voiceTags = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
-const mixInputs = voiceTags + (hasMusic ? '[music]' : '');
-const mixCount = (audioInputs.length);
-
-// Собираем финальный фильтр
-const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
-
-const command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-
-}
+      const voiceInputs = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
+      const mixInputs = voiceInputs + (hasMusic ? '[music]' : '');
+      const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
       
-      logToJob(jobId, 'Creating master audio...');
+      if (audioInputs.length === 1 && !hasMusic) {
+        // FIXED: Added volume boost for single voice track
+        command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.0" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      } else {
+        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+        command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      }
+      
+      logToJob(jobId, 'Creating master audio with boosted voice volume...');
       await execAsync(command);
       
       await fs.access(masterAudioPath);
@@ -247,20 +247,21 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
         textLayer = {
-  type: 'title',
-  text: textData.text,
-  position: textData.position || 'center',
-  color: textData.color || 'white',
-  fontSize: 16, // Меньше размер
-  fontFamily: 'Arial',
-  maxWidth: 0.8 // Не более 80% ширины кадра
-};
+          type: 'title',
+          text: textData.text,
+          position: textData.position || 'bottom', // FIXED: Changed from 'center' to 'bottom'
+          color: textData.color || 'white',
+          fontSize: textData.fontSize || 24, // FIXED: Reduced from 48 to 24
+          fontFamily: 'Arial',
+          // FIXED: Added text styling options
+          textAlign: 'center',
+          marginX: 40, // Add horizontal margins
+          marginY: 30, // Add vertical margins
+          backgroundColor: 'rgba(0,0,0,0.7)', // Semi-transparent background
+          padding: 10
+        };
       }
     } catch (e) {}
-
-const layers = [{ type: 'image', path: imagePath }];
-if (textLayer) layers.push(textLayer);
-
 
     let clipDuration = 4;
     if (voiceExists) {
@@ -270,7 +271,9 @@ if (textLayer) layers.push(textLayer);
       }
     }
 
-    
+    const layers = [{ type: 'image', path: imagePath }];
+    if (textLayer) layers.push(textLayer);
+
     clips.push({
       layers,
       duration: clipDuration,
