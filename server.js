@@ -60,8 +60,8 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (clip.voiceAudio) {
         const audioDuration = await getAudioDuration(clip.voiceAudio);
         audioInputs.push(`-i "${clip.voiceAudio}"`);
-        // FIXED: Increased voice volume from default to 2.0 (doubled)
-        filterParts.push(`[${inputIndex}:a]volume=2.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+        // FIXED: Apply volume boost only once per track, then delay
+        filterParts.push(`[${inputIndex}:a]adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
         inputIndex++;
         currentTime += clip.duration;
       } else {
@@ -90,9 +90,15 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       
       if (audioInputs.length === 1 && !hasMusic) {
         // FIXED: Added volume boost for single voice track
-        command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.0" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+        command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=2.5" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       } else {
-        const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+        // FIXED: Apply volume boost to all voice tracks before mixing
+        const voiceBoostFilters = filterParts.filter(f => f.includes('voice')).map((filter, i) => 
+          filter.replace('[voice' + i + ']', `[voice${i}_temp];[voice${i}_temp]volume=2.5[voice${i}]`)
+        );
+        const musicFilters = filterParts.filter(f => f.includes('music'));
+        const allFilters = [...voiceBoostFilters, ...musicFilters];
+        const filterComplex = allFilters.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
         command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       }
       
@@ -246,19 +252,19 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
+        // FIXED: Simplified text configuration for better editly compatibility
         textLayer = {
           type: 'title',
           text: textData.text,
-          position: textData.position || 'bottom', // FIXED: Changed from 'center' to 'bottom'
-          color: textData.color || 'white',
-          fontSize: textData.fontSize || 24, // FIXED: Reduced from 48 to 24
-          fontFamily: 'Arial',
-          // FIXED: Added text styling options
-          textAlign: 'center',
-          marginX: 40, // Add horizontal margins
-          marginY: 30, // Add vertical margins
-          backgroundColor: 'rgba(0,0,0,0.7)', // Semi-transparent background
-          padding: 10
+          // Use editly's supported positioning
+          position: { x: 0.5, y: 0.85 }, // Bottom center (x: 0.5 = center, y: 0.85 = near bottom)
+          color: textData.color || '#FFFFFF',
+          fontSize: '0.04', // FIXED: Use relative font size (4% of video height)
+          fontFamily: textData.fontFamily || 'Arial Bold',
+          // FIXED: Add shadow for better readability
+          fontPath: null,
+          strokeWidth: 2,
+          strokeColor: '#000000'
         };
       }
     } catch (e) {}
