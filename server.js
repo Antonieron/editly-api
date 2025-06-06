@@ -58,14 +58,14 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       const clip = clips[i];
       
       if (clip.voiceAudio) {
-        const audioDuration = await getAudioDuration(clip.voiceAudio);
-        audioInputs.push(`-i "${clip.voiceAudio}"`);
-        filterParts.push(`[${inputIndex}:a]volume=2.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
-        inputIndex++;
-        currentTime += clip.duration;
-      } else {
-        currentTime += clip.duration;
-      }
+  const audioDuration = await getAudioDuration(clip.voiceAudio);
+  audioInputs.push(`-i "${clip.voiceAudio}"`);
+  filterParts.push(`[${inputIndex}:a]volume=1.0,adelay=${Math.round(currentTime * 1000)}|${Math.round(currentTime * 1000)}[voice${inputIndex}]`);
+  inputIndex++;
+  currentTime += clip.duration;
+} else {
+  currentTime += clip.duration;
+}
     }
     
     if (audioInputs.length === 0 && !hasMusic) {
@@ -74,23 +74,26 @@ const createMasterAudio = async (requestId, clips, jobId) => {
     }
     
     const totalDuration = currentTime;
-    
-    if (hasMusic) {
+
+if (hasMusic) {
   audioInputs.push(`-i "${musicPath}"`);
-  filterParts.push(`[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=0:${totalDuration}[music]`);
+  filterParts.push(
+    `[${inputIndex}:a]volume=0.2,aloop=loop=-1:size=2e+09,atrim=0:${totalDuration}[music]`
+  );
 }
+
     
     let command;
     if (audioInputs.length > 0) {
-      const voiceInputs = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
-      const mixInputs = voiceInputs + (hasMusic ? '[music]' : '');
-      const mixCount = (audioInputs.length - (hasMusic ? 1 : 0)) + (hasMusic ? 1 : 0);
-      
-      if (audioInputs.length === 1 && !hasMusic) {
-  command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
-} else {
-  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest:normalize=1[out]`;
-  command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+      const voiceTags = filterParts.filter(f => f.includes('voice')).map((_, i) => `[voice${i}]`).join('');
+const mixInputs = voiceTags + (hasMusic ? '[music]' : '');
+const mixCount = (audioInputs.length);
+
+// Собираем финальный фильтр
+const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+
+const command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
+
 }
       
       logToJob(jobId, 'Creating master audio...');
