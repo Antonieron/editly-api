@@ -89,7 +89,7 @@ const createMasterAudio = async (requestId, clips, jobId) => {
       if (audioInputs.length === 1 && !hasMusic) {
   command = `ffmpeg -y ${audioInputs[0]} -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
 } else {
-  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest[out]`;
+  const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest:normalize=1[out]`;
   command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
 }
       
@@ -244,13 +244,14 @@ const buildEditSpec = async (requestId, numSlides, jobId) => {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
         textLayer = {
-          type: 'title',
-          text: textData.text,
-          position: textData.position || 'center',
-          color: textData.color || 'white',
-          fontSize: textData.fontSize || 24,
-          fontFamily: 'Arial'
-        };
+  type: 'title',
+  text: textData.text,
+  position: textData.position || 'center',
+  color: textData.color || 'white',
+  fontSize: 16, // Меньше размер
+  fontFamily: 'Arial',
+  maxWidth: 0.8 // Не более 80% ширины кадра
+};
       }
     } catch (e) {}
 
