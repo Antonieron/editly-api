@@ -22,70 +22,39 @@ const JOB_LOGS = new Map();
 const DEFAULT_SETTINGS = {
   voiceVolume: 1.0,
   musicVolume: 0.2,
-  fontSize: 'dynamic', // 'small', 'medium', 'large', 'dynamic'
-  textEffect: 'fade', // 'fade', 'slide', 'zoom', 'typewriter'
-  imageEffect: 'ken-burns', // 'none', 'ken-burns', 'zoom-in', 'zoom-out'
-  transitionType: 'fade', // 'fade', 'wipe', 'slide', 'dissolve'
-  transitionDuration: 0.5
+  fontSize: 40, // В пикселях для Editly
+  fontColor: '#FFFFFF',
+  strokeColor: '#000000',
+  strokeWidth: 4,
+  transitionName: 'fade', // Поддерживаемые Editly переходы
+  transitionDuration: 0.5,
+  enableKenBurns: true, // Эффект Ken Burns для изображений
+  kenBurnsZoomAmount: 1.1, // Степень увеличения (1.1 = 10%)
+  textPosition: { x: 0.5, y: 0.85 } // Позиция текста
 };
 
-// Функции для эффектов текста
-const getTextAnimation = (effect, duration) => {
-  switch (effect) {
-    case 'slide':
-      return {
-        type: 'slide',
-        direction: 'bottom',
-        duration: Math.min(duration * 0.2, 0.5)
-      };
-    case 'zoom':
-      return {
-        type: 'zoom',
-        startScale: 0.5,
-        endScale: 1,
-        duration: Math.min(duration * 0.2, 0.5)
-      };
-    case 'typewriter':
-      return {
-        type: 'typewriter',
-        speed: 50,
-        duration: Math.min(duration * 0.3, 1)
-      };
-    default:
-      return {
-        type: 'fade',
-        duration: Math.min(duration * 0.2, 0.5)
-      };
+// Поддерживаемые переходы Editly
+const SUPPORTED_TRANSITIONS = [
+  'fade', 'fadegrayscale', 'random',
+  'directional-left', 'directional-right', 'directional-up', 'directional-down',
+  'wipe-left', 'wipe-right', 'wipe-up', 'wipe-down',
+  'sliding-left', 'sliding-right', 'sliding-up', 'sliding-down'
+];
+
+// Функция для определения размера шрифта
+const calculateFontSize = (settings, textLength) => {
+  // Если передан конкретный размер, используем его
+  if (typeof settings.fontSize === 'number') {
+    return settings.fontSize;
   }
+  
+  // Динамический размер в зависимости от длины текста
+  if (textLength > 100) return 30;
+  if (textLength > 50) return 35;
+  return 40;
 };
 
-// Функции для эффектов изображений
-const getImageAnimation = (effect, duration) => {
-  switch (effect) {
-    case 'ken-burns':
-      return {
-        type: 'ken-burns',
-        zoomDirection: Math.random() > 0.5 ? 'in' : 'out',
-        zoomAmount: 0.1
-      };
-    case 'zoom-in':
-      return {
-        type: 'zoom',
-        startScale: 1,
-        endScale: 1.1
-      };
-    case 'zoom-out':
-      return {
-        type: 'zoom',
-        startScale: 1.1,
-        endScale: 1
-      };
-    default:
-      return null;
-  }
-};
-
-// Улучшенные функции для обработки текста титров
+// Добавленные функции для улучшения обработки текста титров
 const getTextLines = (text, maxWordsPerLine) => {
   const words = text.split(' ');
   const lines = [];
@@ -93,23 +62,6 @@ const getTextLines = (text, maxWordsPerLine) => {
     lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
   }
   return lines;
-};
-
-// Функция для определения размера шрифта
-const getFontSize = (setting, textLength) => {
-  if (setting === 'dynamic') {
-    if (textLength > 100) return '0.03';
-    if (textLength > 50) return '0.035';
-    return '0.04';
-  }
-  
-  const sizes = {
-    'small': '0.025',
-    'medium': '0.035',
-    'large': '0.045'
-  };
-  
-  return sizes[setting] || '0.035';
 };
 
 const logToJob = (jobId, message, type = 'info') => {
@@ -185,6 +137,7 @@ const createMasterAudio = async (requestId, clips, jobId, settings) => {
       if (audioInputs.length === 1 && !hasMusic) {
         command = `ffmpeg -y ${audioInputs[0]} -filter:a "volume=${settings.voiceVolume}" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       } else {
+        // normalize=0 предотвращает автоматическое изменение громкости
         const filterComplex = filterParts.join(';') + `;${mixInputs}amix=inputs=${mixCount}:duration=longest:normalize=0[out]`;
         command = `ffmpeg -y ${audioInputs.join(' ')} -filter_complex "${filterComplex}" -map "[out]" -c:a pcm_s16le -ar 44100 -ac 2 "${masterAudioPath}"`;
       }
@@ -343,42 +296,56 @@ const buildEditSpec = async (requestId, numSlides, jobId, settings) => {
       }
     }
 
-    // Создаем слой изображения с эффектом
-    const imageLayers = [{
-      type: 'image',
-      path: imagePath,
-      ...getImageAnimation(settings.imageEffect, clipDuration)
-    }];
+    const layers = [];
+    
+    // Слой изображения с эффектом Ken Burns (если включен)
+    if (settings.enableKenBurns) {
+      layers.push({
+        type: 'image',
+        path: imagePath,
+        zoomDirection: i % 2 === 0 ? 'in' : 'out', // Чередуем направление зума
+        zoomAmount: settings.kenBurnsZoomAmount
+      });
+    } else {
+      layers.push({
+        type: 'image',
+        path: imagePath
+      });
+    }
 
     // Обработка текста
-    let textLayer = null;
     try {
       const textData = JSON.parse(await fs.readFile(textPath, 'utf-8'));
       if (textData.text && textData.text.trim()) {
         const text = textData.text;
         const lines = getTextLines(text, 8);
-        const fontSize = getFontSize(settings.fontSize, text.length);
+        const fontSize = calculateFontSize(settings, text.length);
 
-        textLayer = {
+        // Добавляем фоновую подложку для текста
+        layers.push({
+          type: 'title-background',
+          text: lines.join('\n'),
+          position: settings.textPosition,
+          fontSize: fontSize,
+          color: 'rgba(0,0,0,0.7)', // Полупрозрачный черный фон
+          padding: 10
+        });
+
+        // Добавляем сам текст
+        layers.push({
           type: 'subtitle',
           text: lines.join('\n'),
-          position: { x: 0.5, y: 0.85 },
-          color: textData.color || '#FFFFFF',
+          position: settings.textPosition,
           fontSize: fontSize,
-          fontFamily: textData.fontFamily || 'Arial Bold',
-          strokeWidth: 4,
-          strokeColor: '#000000',
-          textAlign: 'center',
-          originX: 'center',
-          originY: 'center',
-          maxWidth: 0.9,
-          animation: getTextAnimation(settings.textEffect, clipDuration)
-        };
+          color: textData.color || settings.fontColor,
+          fontFamily: textData.fontFamily || 'Arial',
+          strokeWidth: settings.strokeWidth,
+          strokeColor: settings.strokeColor
+        });
       }
-    } catch (e) {}
-
-    const layers = [...imageLayers];
-    if (textLayer) layers.push(textLayer);
+    } catch (e) {
+      logToJob(jobId, `Failed to process text for slide ${i}: ${e.message}`);
+    }
 
     clips.push({
       layers,
@@ -391,13 +358,10 @@ const buildEditSpec = async (requestId, numSlides, jobId, settings) => {
 
   const finalVideoPath = path.join('media', requestId, 'video', 'final.mp4');
 
-  // Определяем переходы
-  const transitions = {
-    'fade': { name: 'fade', duration: settings.transitionDuration },
-    'wipe': { name: 'wipe', duration: settings.transitionDuration },
-    'slide': { name: 'slide', duration: settings.transitionDuration },
-    'dissolve': { name: 'crossfade', duration: settings.transitionDuration }
-  };
+  // Проверяем, что переход поддерживается
+  const transitionName = SUPPORTED_TRANSITIONS.includes(settings.transitionName) 
+    ? settings.transitionName 
+    : 'fade';
 
   const editlySpec = {
     outPath: finalVideoPath,
@@ -409,8 +373,13 @@ const buildEditSpec = async (requestId, numSlides, jobId, settings) => {
       duration: clip.duration
     })),
     defaults: {
-      transition: transitions[settings.transitionType] || transitions.fade,
-      layer: { resizeMode: 'contain' }
+      transition: { 
+        name: transitionName, 
+        duration: settings.transitionDuration 
+      },
+      layer: { 
+        resizeMode: 'contain'
+      }
     },
     keepSourceAudio: false,
     fast: false
@@ -487,7 +456,8 @@ app.post('/register-job', async (req, res) => {
       success: true,
       requestId,
       videoUrl: uploadResult.publicUrl,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      settings: finalSettings
     };
 
     await fetch(webhookUrl, {
@@ -500,7 +470,8 @@ app.post('/register-job', async (req, res) => {
       status: 'completed',
       createdAt: new Date(),
       requestId,
-      videoUrl: uploadResult.publicUrl
+      videoUrl: uploadResult.publicUrl,
+      settings: finalSettings
     });
 
     logToJob(jobId, `Completed: ${uploadResult.publicUrl}`);
@@ -546,6 +517,21 @@ app.get('/video-url/:requestId', (req, res) => {
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString(), activeJobs: JOBS.size });
+});
+
+// Эндпоинт для получения поддерживаемых настроек
+app.get('/supported-settings', (req, res) => {
+  res.json({
+    transitions: SUPPORTED_TRANSITIONS,
+    defaultSettings: DEFAULT_SETTINGS,
+    info: {
+      fontSize: "Number in pixels (e.g., 30, 40, 50)",
+      voiceVolume: "Float value (e.g., 0.5, 1.0, 2.0)",
+      musicVolume: "Float value (e.g., 0.1, 0.2, 0.5)",
+      transitionDuration: "Duration in seconds (e.g., 0.5, 1.0)",
+      kenBurnsZoomAmount: "Zoom factor (e.g., 1.1 = 10% zoom)"
+    }
+  });
 });
 
 setInterval(() => {
