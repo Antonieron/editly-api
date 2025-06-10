@@ -5,9 +5,7 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
   "dependencies": {
     "dotenv": "^16.3.1",
@@ -17,16 +15,6 @@
     "puppeteer": "^21.3.8"
   },
   "engines": {
-    "node": ">=18.0.0",
-    "npm": ">=8.0.0"
-  },
-  "keywords": [
-    "video",
-    "rendering",
-    "slides",
-    "puppeteer",
-    "ffmpeg"
-  ],
-  "author": "",
-  "license": "MIT"
+    "node": ">=18.0.0"
+  }
 }
