@@ -1,16 +1,32 @@
 {
   "name": "video-renderer-server",
   "version": "1.0.0",
+  "description": "Video rendering server with slide generation",
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "fs-extra": "^11.2.0",
-    "node-fetch": "^2.6.7",
-    "uuid": "^9.0.0",
+    "node-fetch": "^2.7.0",
+    "uuid": "^9.0.1",
     "puppeteer": "^21.3.8"
-  }
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=8.0.0"
+  },
+  "keywords": [
+    "video",
+    "rendering",
+    "slides",
+    "puppeteer",
+    "ffmpeg"
+  ],
+  "author": "",
+  "license": "MIT"
 }
