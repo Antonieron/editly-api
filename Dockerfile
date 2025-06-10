@@ -3,7 +3,6 @@ FROM node:18-bullseye
 # Установка системных зависимостей
 RUN apt-get update && apt-get install -y \
   ffmpeg \
-  ffprobe \
   libx11-dev \
   libx11-xcb1 \
   libxcb1 \
@@ -27,8 +26,6 @@ RUN apt-get update && apt-get install -y \
   libxtst6 \
   libgtk-3-0 \
   libgdk-pixbuf2.0-0 \
-  libxcomposite1 \
-  libxss1 \
   fonts-liberation \
   libappindicator3-1 \
   wget \
@@ -43,8 +40,8 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
 # Установка Google Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - && \
-    echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
+RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/googlechrome-linux-keyring.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/googlechrome-linux-keyring.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google.list && \
     apt-get update && \
     apt-get install -y google-chrome-stable && \
     rm -rf /var/lib/apt/lists/*
