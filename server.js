@@ -328,7 +328,23 @@ const createVideoFromImages = async (clips, requestId, jobId) => {
   logToJob(jobId, `Created video list using images WITH TEXT`);
   logToJob(jobId, `Video list content: ${listContent.replace(/\n/g, ' | ')}`);
   
+  // DEBUG: Проверим что файлы действительно существуют
+  const listLines = listContent.split('\n').filter(line => line.startsWith('file'));
+  for (const line of listLines) {
+    const filename = line.match(/'([^']+)'/)?.[1];
+    if (filename) {
+      const fullPath = path.join(mediaDir, filename);
+      try {
+        const stats = await fs.stat(fullPath);
+        logToJob(jobId, `📁 File ${filename} exists: ${stats.size} bytes`);
+      } catch (error) {
+        logToJob(jobId, `❌ File ${filename} NOT FOUND!`);
+      }
+    }
+  }
+  
   // Create horizontal video (16:9 aspect ratio, 1920x1080)
+  // ДОБАВИМ более подробное логирование FFmpeg
   const args = [
     '-f', 'concat',
     '-safe', '0',
@@ -341,9 +357,41 @@ const createVideoFromImages = async (clips, requestId, jobId) => {
     '-y', videoPath
   ];
   
-  await runFFmpeg(args, 'Creating horizontal video from images WITH TEXT');
-  logToJob(jobId, `Horizontal video created (1920x1080) using images with text overlays`);
+  logToJob(jobId, `FFmpeg command: ffmpeg ${args.join(' ')}`);
   
+  try {
+    await runFFmpeg(args, 'Creating horizontal video from images WITH TEXT');
+    logToJob(jobId, `✅ Horizontal video created (1920x1080) using images with text overlays`);
+  } catch (error) {
+    logToJob(jobId, `❌ Concat method failed: ${error.message}`);
+    logToJob(jobId, `Trying alternative method: individual images`);
+    
+    // Alternative method: create video from individual images with explicit durations
+    let filterParts = [];
+    let inputParts = [];
+    
+    for (let i = 0; i < clips.length; i++) {
+      inputParts.push('-loop', '1', '-t', clips[i].duration.toString(), '-i', `${i}_with_text.jpg`);
+      filterParts.push(`[${i}:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30[v${i}]`);
+    }
+    
+    const concatFilter = filterParts.join(';') + ';' + filterParts.map((_, i) => `[v${i}]`).join('') + `concat=n=${clips.length}:v=1:a=0[out]`;
+    
+    const altArgs = [
+      ...inputParts,
+      '-filter_complex', concatFilter,
+      '-map', '[out]',
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-crf', '23',
+      '-pix_fmt', 'yuv420p',
+      '-y', videoPath
+    ];
+    
+    logToJob(jobId, `Alternative FFmpeg command: ffmpeg ${altArgs.join(' ')}`);
+    await runFFmpeg(altArgs, 'Creating video using alternative method');
+    logToJob(jobId, `✅ Alternative method successful`);
+  }
   return videoPath;
 };
 
