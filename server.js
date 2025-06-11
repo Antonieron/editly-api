@@ -125,7 +125,7 @@ const createClips = async (slides, requestId, jobId) => {
   return clips;
 };
 
-// Add text to images with basic overlay
+// Add text to images with better text handling
 const addTextToImages = async (clips, requestId, jobId) => {
   logToJob(jobId, `Adding text overlays to images`);
   
@@ -134,18 +134,36 @@ const addTextToImages = async (clips, requestId, jobId) => {
     const inputPath = path.join('media', requestId, `${i}.jpg`);
     const outputPath = path.join('media', requestId, `${i}_with_text.jpg`);
     
-    // Simple text overlay
-    const displayText = clip.text.length > 150 ? 
+    // Clean text for FFmpeg - remove problematic characters
+    let displayText = clip.text.length > 150 ? 
       clip.text.substring(0, 147) + '...' : clip.text;
+    
+    // Escape special characters for FFmpeg
+    displayText = displayText
+      .replace(/'/g, "\\'")      // Escape single quotes
+      .replace(/"/g, '\\"')      // Escape double quotes
+      .replace(/\n/g, ' ')       // Replace newlines with spaces
+      .replace(/\r/g, ' ')       // Replace carriage returns
+      .replace(/:/g, '\\:')      // Escape colons
+      .replace(/\[/g, '\\[')     // Escape square brackets
+      .replace(/\]/g, '\\]');
+    
+    logToJob(jobId, `Processing text for image ${i}: "${displayText.substring(0, 50)}..."`);
     
     const args = [
       '-i', inputPath,
-      '-vf', `drawtext=text='${displayText.replace(/'/g, "\\'")}':fontsize=32:fontcolor=white:x=50:y=50:shadowcolor=black:shadowx=2:shadowy=2`,
+      '-vf', `drawtext=text='${displayText}':fontsize=32:fontcolor=white:x=50:y=50:shadowcolor=black:shadowx=2:shadowy=2`,
       '-y', outputPath
     ];
     
-    await runFFmpeg(args, `Adding text to image ${i}`);
-    logToJob(jobId, `Added text overlay to image ${i}`);
+    try {
+      await runFFmpeg(args, `Adding text to image ${i}`);
+      logToJob(jobId, `Added text overlay to image ${i}`);
+    } catch (error) {
+      logToJob(jobId, `Warning: Failed to add text to image ${i}, using image without text`);
+      // Copy original image if text overlay fails
+      await fs.copyFile(inputPath, outputPath);
+    }
   }
 };
 
@@ -262,7 +280,7 @@ const uploadVideoToSupabase = async (videoPath, requestId, jobId) => {
 const cleanupFiles = async (requestId, jobId) => {
   try {
     const mediaDir = path.join('media', requestId);
-    await fs.rmdir(mediaDir, { recursive: true });
+    await fs.rm(mediaDir, { recursive: true, force: true }); // Fixed deprecated method
     logToJob(jobId, `Temporary files cleaned up`);
   } catch (error) {
     logToJob(jobId, `Cleanup warning: ${error.message}`);
@@ -352,10 +370,15 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
   } catch (error) {
     logToJob(jobId, `ERROR: Job failed: ${error.message}`);
     
+    // Don't log full stack trace to job logs, but log to console
+    console.error(`[${jobId}] Full error:`, error);
+    
     const job = jobs.get(jobId);
-    job.status = 'failed';
-    job.error = error.message;
-    job.completedAt = new Date().toISOString();
+    if (job) {
+      job.status = 'failed';
+      job.error = error.message;
+      job.completedAt = new Date().toISOString();
+    }
     
     await cleanupFiles(requestId, jobId);
   }
