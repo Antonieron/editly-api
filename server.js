@@ -619,49 +619,91 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
 // Routes
 app.post('/register-job', async (req, res) => {
   try {
-    console.log('Received request body:', JSON.stringify(req.body, null, 2));
+    console.log('=== REQUEST DEBUG ===');
+    console.log('Headers:', req.headers);
+    console.log('Body type:', typeof req.body);
+    console.log('Body is array:', Array.isArray(req.body));
+    console.log('Body length:', req.body?.length);
+    console.log('Raw body:', JSON.stringify(req.body, null, 2));
+    console.log('===================');
     
     let requestId, numSlides, musicUrl, slidesData;
+    
+    // Check if body exists
+    if (!req.body) {
+      return res.status(400).json({ 
+        error: 'No request body received',
+        headers: req.headers
+      });
+    }
     
     if (Array.isArray(req.body) && req.body.length > 0) {
       // New format: Array of slide objects
       slidesData = req.body;
+      
+      console.log('Processing array format...');
+      console.log('First slide:', JSON.stringify(slidesData[0], null, 2));
+      
       requestId = slidesData[0].request_id;
       numSlides = slidesData.length;
       
-      // Music URL from first slide's audio path (assume music is at same level)
-      const audioPath = slidesData[0].audio_url;
-      if (audioPath.startsWith('media/')) {
-        // Extract base path and construct music URL
-        const basePath = audioPath.split('/audio/')[0];
-        musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/${basePath}/audio/music.mp3`;
+      console.log('Extracted requestId:', requestId);
+      console.log('Extracted numSlides:', numSlides);
+      
+      // Music URL construction
+      const firstAudioUrl = slidesData[0].audio_url;
+      console.log('First audio URL:', firstAudioUrl);
+      
+      if (firstAudioUrl && firstAudioUrl.includes('/audio/')) {
+        // Extract base path: media/85dca25d-fc8a-45df-81d2-7698b0364ea1/audio/0.mp3
+        // Result should be: media/85dca25d-fc8a-45df-81d2-7698b0364ea1/audio/music.mp3
+        const pathParts = firstAudioUrl.split('/');
+        pathParts[pathParts.length - 1] = 'music.mp3'; // Replace filename
+        const musicPath = pathParts.join('/');
+        musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/${musicPath}`;
+        
+        console.log('Constructed music URL:', musicUrl);
       } else {
+        console.log('Could not construct music URL from:', firstAudioUrl);
         return res.status(400).json({ 
-          error: 'Invalid audio URL format',
-          audioUrl: audioPath
+          error: 'Invalid audio URL format - cannot construct music URL',
+          audioUrl: firstAudioUrl,
+          sample: slidesData[0]
         });
       }
+      
     } else if (req.body && typeof req.body === 'object') {
       // Old format compatibility
+      console.log('Processing object format...');
       requestId = req.body.requestId;
       numSlides = req.body.numSlides;
       musicUrl = req.body.musicUrl;
     } else {
+      console.log('Invalid format detected');
       return res.status(400).json({ 
-        error: 'Invalid request format',
+        error: 'Invalid request format - expected array or object',
+        bodyType: typeof req.body,
+        isArray: Array.isArray(req.body),
         body: req.body
       });
     }
     
-    console.log('Extracted values:', { requestId, numSlides, musicUrl });
+    console.log('Final extracted values:', { requestId, numSlides, musicUrl });
     
     if (!requestId || !numSlides || !musicUrl) {
+      console.log('Validation failed');
       return res.status(400).json({ 
         error: 'Missing required fields: requestId, numSlides, musicUrl',
         received: { 
-          requestId: !!requestId, 
-          numSlides: !!numSlides, 
-          musicUrl: !!musicUrl 
+          requestId: requestId || 'MISSING', 
+          numSlides: numSlides || 'MISSING', 
+          musicUrl: musicUrl || 'MISSING'
+        },
+        debug: {
+          bodyType: typeof req.body,
+          isArray: Array.isArray(req.body),
+          hasSlides: !!slidesData,
+          firstSlide: slidesData?.[0] || 'none'
         }
       });
     }
@@ -678,8 +720,10 @@ app.post('/register-job', async (req, res) => {
     
     // Start processing with new format
     if (slidesData && Array.isArray(slidesData)) {
+      console.log(`Starting V3 processing with ${slidesData.length} slides`);
       processVideoJobV3(requestId, numSlides, musicUrl, slidesData, jobId);
     } else {
+      console.log('Starting V1 processing (fallback)');
       processVideoJob(requestId, numSlides, musicUrl, jobId);
     }
     
@@ -687,7 +731,12 @@ app.post('/register-job', async (req, res) => {
       success: true, 
       jobId,
       message: 'Job registered and processing started',
-      format: slidesData ? 'v3' : 'v1'
+      format: slidesData ? 'v3' : 'v1',
+      debug: {
+        requestId,
+        numSlides,
+        musicUrl: musicUrl.substring(0, 50) + '...'
+      }
     });
     
   } catch (error) {
@@ -697,6 +746,24 @@ app.post('/register-job', async (req, res) => {
       stack: error.stack
     });
   }
+});
+
+// Test endpoint for debugging
+app.post('/test-data', (req, res) => {
+  console.log('=== TEST ENDPOINT ===');
+  console.log('Headers:', req.headers);
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('Body type:', typeof req.body);
+  console.log('Is array:', Array.isArray(req.body));
+  console.log('===================');
+  
+  res.json({
+    received: req.body,
+    type: typeof req.body,
+    isArray: Array.isArray(req.body),
+    length: req.body?.length,
+    headers: req.headers
+  });
 });
 
 app.get('/check-job/:jobId', (req, res) => {
