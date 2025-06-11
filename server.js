@@ -162,63 +162,60 @@ const addTextToImages = async (clips, requestId, jobId) => {
     const displayLines = lines.slice(0, 3);
     logToJob(jobId, `Split into ${displayLines.length} lines for image ${i}`);
     
-    // Clean each line for FFmpeg
+    // Clean each line for FFmpeg - более агрессивная очистка
     const cleanLines = displayLines.map(line => 
-      line.replace(/'/g, "\\'")
-          .replace(/"/g, '\\"')
-          .replace(/:/g, '\\:')
-          .replace(/\[/g, '\\[')
-          .replace(/\]/g, '\\]')
-          .replace(/,/g, '\\,')
+      line.replace(/['"]/g, '')        // Удаляем все кавычки
+          .replace(/[:;]/g, '')        // Удаляем двоеточия и точки с запятой
+          .replace(/[[\]]/g, '')       // Удаляем квадратные скобки
+          .replace(/,/g, '')           // Удаляем запятые
+          .replace(/—/g, '-')          // Заменяем длинные тире на обычные
+          .replace(/'/g, '')           // Удаляем апострофы
+          .replace(/"/g, '')           // Удаляем кавычки
+          .replace(/[^\w\s\-\.]/g, '') // Оставляем только буквы, цифры, пробелы, тире и точки
+          .trim()
     );
     
-    // Create animated text filters for each line (simplified animation)
+    logToJob(jobId, `Cleaned lines: ${cleanLines.map(l => `"${l}"`).join(', ')}`);
+    
+    // Попробуем сначала простой статический текст (более надежно)
+    const simpleText = cleanLines.join(' ').substring(0, 120);
+    logToJob(jobId, `Trying simple text: "${simpleText}"`);
+    
+    const simpleArgs = [
+      '-i', inputPath,
+      '-vf', `drawbox=x=0:y=50:w=iw:h=80:color=black@0.7,drawtext=text='${simpleText}':fontsize=24:fontcolor=white:x=30:y=70:shadowcolor=black:shadowx=2:shadowy=2`,
+      '-y', outputPath
+    ];
+    
+    try {
+      await runFFmpeg(simpleArgs, `Adding simple text to image ${i}`);
+      logToJob(jobId, `Successfully added simple text overlay to image ${i}`);
+      continue; // Переходим к следующему изображению
+    } catch (simpleError) {
+      logToJob(jobId, `Simple text failed for image ${i}, trying multi-line`);
+    }
+    
+    // Если простой текст не сработал, пробуем многострочный
     const textFilters = cleanLines.map((line, lineIndex) => {
-      const yPosition = 100 + (lineIndex * 50); // Stack lines vertically
-      const animationDelay = lineIndex * 0.8; // Stagger animation
-      
-      // Simplified slide-in animation from left
-      return `drawtext=text='${line}':` +
-             `fontsize=32:fontcolor=white:` +
-             `x='if(lt(t,${animationDelay}), -200, if(lt(t,${animationDelay + 1.5}), -200+(t-${animationDelay})*200, 50))':` +
-             `y=${yPosition}:` +
-             `shadowcolor=black:shadowx=2:shadowy=2`;
+      const yPosition = 80 + (lineIndex * 40);
+      return `drawtext=text='${line}':fontsize=22:fontcolor=white:x=30:y=${yPosition}:shadowcolor=black:shadowx=2:shadowy=2`;
     });
     
-    // Add semi-transparent background for better readability
-    const backgroundFilter = `drawbox=x=0:y=80:w=iw:h=${displayLines.length * 50 + 40}:color=black@0.6`;
-    
+    const backgroundFilter = `drawbox=x=0:y=60:w=iw:h=${cleanLines.length * 40 + 40}:color=black@0.7`;
     const filterString = [backgroundFilter, ...textFilters].join(',');
     
-    logToJob(jobId, `Adding ${displayLines.length} animated text lines to image ${i}`);
-    
-    const args = [
+    const multiArgs = [
       '-i', inputPath,
       '-vf', filterString,
       '-y', outputPath
     ];
     
     try {
-      await runFFmpeg(args, `Adding animated text to image ${i}`);
-      logToJob(jobId, `Successfully added animated text overlay to image ${i}`);
-    } catch (error) {
-      logToJob(jobId, `Animation failed, trying simple text for image ${i}`);
-      
-      // Fallback: simple static text without animation
-      const simpleText = cleanLines.join(' ').substring(0, 100);
-      const simpleArgs = [
-        '-i', inputPath,
-        '-vf', `drawtext=text='${simpleText}':fontsize=28:fontcolor=white:x=50:y=50:shadowcolor=black:shadowx=2:shadowy=2`,
-        '-y', outputPath
-      ];
-      
-      try {
-        await runFFmpeg(simpleArgs, `Adding simple text to image ${i}`);
-        logToJob(jobId, `Added simple text overlay to image ${i}`);
-      } catch (simpleError) {
-        logToJob(jobId, `All text methods failed for image ${i}, using image without text`);
-        await fs.copyFile(inputPath, outputPath);
-      }
+      await runFFmpeg(multiArgs, `Adding multi-line text to image ${i}`);
+      logToJob(jobId, `Successfully added multi-line text to image ${i}`);
+    } catch (multiError) {
+      logToJob(jobId, `All text methods failed for image ${i}, using image without text`);
+      await fs.copyFile(inputPath, outputPath);
     }
   }
 };
