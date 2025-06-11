@@ -525,7 +525,7 @@ const processVideoJobV2 = async (requestId, numSlides, musicUrl, supabaseData, j
 // Main video processing function (original format - kept for backward compatibility)
 const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
   try {
-    logToJob(jobId, `Job started for request ${requestId} with ${numSlides} slides`);
+    logToJob(jobId, `Job started for request ${requestId} with ${numSlides} slides (V1 format)`);
     
     // Create directories
     const mediaDir = path.join('media', requestId);
@@ -575,21 +575,27 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
     logToJob(jobId, `Media download completed`);
     
     // Create clips with accurate duration
+    logToJob(jobId, `Creating clips with duration analysis...`);
     const clips = await createClips(allSlides, requestId, jobId);
     
     // Add text overlays to images
+    logToJob(jobId, `Adding animated text overlays...`);
     await addTextToImages(clips, requestId, jobId);
     
     // Create master audio track
+    logToJob(jobId, `Creating master audio with background music...`);
     const audioPath = await createMasterAudio(clips, requestId, jobId);
     
     // Create video directly from images (FAST!)
+    logToJob(jobId, `Creating video from images...`);
     const videoPath = await createVideoFromImages(clips, requestId, jobId);
     
     // Merge video with audio
+    logToJob(jobId, `Merging video with audio...`);
     const finalVideoPath = await mergeVideoWithAudio(videoPath, audioPath, requestId, jobId);
     
     // Upload to Supabase
+    logToJob(jobId, `Uploading final video to Supabase...`);
     const videoUrl = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
     
     // Update job status
@@ -605,6 +611,7 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
     
   } catch (error) {
     logToJob(jobId, `ERROR: Job failed: ${error.message}`);
+    logToJob(jobId, `ERROR: Stack trace: ${error.stack}`);
     
     const job = jobs.get(jobId);
     job.status = 'failed';
@@ -843,7 +850,17 @@ app.post('/test-data', (req, res) => {
   });
 });
 
-app.get('/check-job/:jobId', (req, res) => {
+// Add debug endpoint to see current code
+app.get('/debug-functions', (req, res) => {
+  res.json({
+    addTextToImages: addTextToImages.toString().substring(0, 500),
+    createMasterAudio: createMasterAudio.toString().substring(0, 500),
+    createVideoFromImages: createVideoFromImages.toString().substring(0, 500),
+    mergeVideoWithAudio: mergeVideoWithAudio.toString().substring(0, 500)
+  });
+});
+
+// Check job status
   const job = jobs.get(req.params.jobId);
   
   if (!job) {
