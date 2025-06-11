@@ -177,22 +177,38 @@ const addTextToImages = async (clips, requestId, jobId) => {
     
     logToJob(jobId, `Cleaned lines: ${cleanLines.map(l => `"${l}"`).join(', ')}`);
     
-    // Попробуем сначала простой статический текст (более надежно)
-    const simpleText = cleanLines.join(' ').substring(0, 120);
-    logToJob(jobId, `Trying simple text: "${simpleText}"`);
+    // Попробуем ОЧЕНЬ заметный текст с большим контрастом
+    const simpleText = cleanLines.join(' ').substring(0, 80); // Сократим текст
+    logToJob(jobId, `Trying BIG visible text: "${simpleText}"`);
     
-    const simpleArgs = [
+    // Создаем ОЧЕНЬ заметный текст - большой, яркий, с контрастным фоном
+    const bigTextArgs = [
       '-i', inputPath,
-      '-vf', `drawbox=x=0:y=50:w=iw:h=80:color=black@0.7,drawtext=text='${simpleText}':fontsize=24:fontcolor=white:x=30:y=70:shadowcolor=black:shadowx=2:shadowy=2`,
+      '-vf', `drawbox=x=50:y=900:w=1800:h=120:color=black@0.8,drawtext=text='${simpleText}':fontsize=48:fontcolor=yellow:x=60:y=930:shadowcolor=red:shadowx=4:shadowy=4`,
       '-y', outputPath
     ];
     
     try {
-      await runFFmpeg(simpleArgs, `Adding simple text to image ${i}`);
-      logToJob(jobId, `Successfully added simple text overlay to image ${i}`);
-      continue; // Переходим к следующему изображению
-    } catch (simpleError) {
-      logToJob(jobId, `Simple text failed for image ${i}, trying multi-line`);
+      await runFFmpeg(bigTextArgs, `Adding BIG visible text to image ${i}`);
+      logToJob(jobId, `✅ SUCCESS: Added BIG visible text to image ${i}`);
+      continue;
+    } catch (bigError) {
+      logToJob(jobId, `Big text failed: ${bigError.message}`);
+    }
+    
+    // Fallback: простой черный фон с белым текстом
+    const fallbackArgs = [
+      '-i', inputPath,
+      '-vf', `drawbox=x=0:y=0:w=iw:h=100:color=black,drawtext=text='${simpleText}':fontsize=36:fontcolor=white:x=20:y=30`,
+      '-y', outputPath
+    ];
+    
+    try {
+      await runFFmpeg(fallbackArgs, `Adding fallback text to image ${i}`);
+      logToJob(jobId, `✅ Added fallback text to image ${i}`);
+      continue;
+    } catch (fallbackError) {
+      logToJob(jobId, `Fallback failed: ${fallbackError.message}`);
     }
     
     // Если простой текст не сработал, пробуем многострочный
@@ -275,15 +291,28 @@ const createVideoFromImages = async (clips, requestId, jobId) => {
   // Calculate total duration
   const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
   
-  // Verify that all images with text exist
+  // Verify that all images with text exist and are different from originals
   for (let i = 0; i < clips.length; i++) {
+    const originalPath = path.join(mediaDir, `${i}.jpg`);
     const textImagePath = path.join(mediaDir, `${i}_with_text.jpg`);
+    
     try {
       await fs.access(textImagePath);
-      logToJob(jobId, `✅ Image with text ${i}_with_text.jpg exists`);
+      
+      // Check file sizes to verify text was added
+      const originalStats = await fs.stat(originalPath);
+      const textStats = await fs.stat(textImagePath);
+      
+      logToJob(jobId, `📊 Image ${i}: Original=${originalStats.size} bytes, WithText=${textStats.size} bytes`);
+      
+      if (Math.abs(originalStats.size - textStats.size) < 1000) {
+        logToJob(jobId, `⚠️  WARNING: Image ${i} with text is very similar size to original - text might not have been added`);
+      } else {
+        logToJob(jobId, `✅ Image ${i} with text is different from original - text successfully added`);
+      }
+      
     } catch (error) {
       logToJob(jobId, `❌ Missing ${i}_with_text.jpg, copying original`);
-      const originalPath = path.join(mediaDir, `${i}.jpg`);
       await fs.copyFile(originalPath, textImagePath);
     }
   }
