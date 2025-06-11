@@ -638,38 +638,47 @@ app.post('/register-job', async (req, res) => {
     }
     
     if (Array.isArray(req.body) && req.body.length > 0) {
-      // New format: Array of slide objects
-      slidesData = req.body;
+      // Check if it's the new slides format (has image_url, audio_url, etc.)
+      const firstItem = req.body[0];
       
-      console.log('Processing array format...');
-      console.log('First slide:', JSON.stringify(slidesData[0], null, 2));
-      
-      requestId = slidesData[0].request_id;
-      numSlides = slidesData.length;
-      
-      console.log('Extracted requestId:', requestId);
-      console.log('Extracted numSlides:', numSlides);
-      
-      // Music URL construction
-      const firstAudioUrl = slidesData[0].audio_url;
-      console.log('First audio URL:', firstAudioUrl);
-      
-      if (firstAudioUrl && firstAudioUrl.includes('/audio/')) {
-        // Extract base path: media/85dca25d-fc8a-45df-81d2-7698b0364ea1/audio/0.mp3
-        // Result should be: media/85dca25d-fc8a-45df-81d2-7698b0364ea1/audio/music.mp3
-        const pathParts = firstAudioUrl.split('/');
-        pathParts[pathParts.length - 1] = 'music.mp3'; // Replace filename
-        const musicPath = pathParts.join('/');
-        musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/${musicPath}`;
+      if (firstItem.image_url && firstItem.audio_url && firstItem.request_id) {
+        // New format: Array of slide objects (v3)
+        slidesData = req.body;
         
-        console.log('Constructed music URL:', musicUrl);
+        console.log('Processing V3 array format...');
+        console.log('First slide:', JSON.stringify(slidesData[0], null, 2));
+        
+        requestId = slidesData[0].request_id;
+        numSlides = slidesData.length;
+        
+        console.log('Extracted requestId:', requestId);
+        console.log('Extracted numSlides:', numSlides);
+        
+        // Music URL construction for v3
+        const firstAudioUrl = slidesData[0].audio_url;
+        console.log('First audio URL:', firstAudioUrl);
+        
+        if (firstAudioUrl && firstAudioUrl.includes('/audio/')) {
+          const pathParts = firstAudioUrl.split('/');
+          pathParts[pathParts.length - 1] = 'music.mp3';
+          const musicPath = pathParts.join('/');
+          musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/${musicPath}`;
+          
+          console.log('Constructed music URL (v3):', musicUrl);
+        } else {
+          console.log('Could not construct music URL from:', firstAudioUrl);
+          return res.status(400).json({ 
+            error: 'Invalid audio URL format - cannot construct music URL',
+            audioUrl: firstAudioUrl
+          });
+        }
       } else {
-        console.log('Could not construct music URL from:', firstAudioUrl);
-        return res.status(400).json({ 
-          error: 'Invalid audio URL format - cannot construct music URL',
-          audioUrl: firstAudioUrl,
-          sample: slidesData[0]
-        });
+        // Old v2 format: Array with different structure
+        console.log('Processing V2 array format...');
+        const data = req.body[0];
+        requestId = data.requestId;
+        numSlides = data.numSlides;
+        musicUrl = data.musicUrl || `${data.supabaseBaseUrl}${data.music}`;
       }
       
     } else if (req.body && typeof req.body === 'object') {
@@ -718,10 +727,13 @@ app.post('/register-job', async (req, res) => {
       logs: []
     });
     
-    // Start processing with new format
-    if (slidesData && Array.isArray(slidesData)) {
+    // Start processing with correct format
+    if (slidesData && Array.isArray(slidesData) && slidesData[0].image_url) {
       console.log(`Starting V3 processing with ${slidesData.length} slides`);
       processVideoJobV3(requestId, numSlides, musicUrl, slidesData, jobId);
+    } else if (slidesData && Array.isArray(slidesData)) {
+      console.log(`Starting V2 processing with ${slidesData.length} slides`);
+      processVideoJobV2(requestId, numSlides, musicUrl, slidesData, jobId);
     } else {
       console.log('Starting V1 processing (fallback)');
       processVideoJob(requestId, numSlides, musicUrl, jobId);
@@ -731,11 +743,13 @@ app.post('/register-job', async (req, res) => {
       success: true, 
       jobId,
       message: 'Job registered and processing started',
-      format: slidesData ? 'v3' : 'v1',
+      format: slidesData && slidesData[0]?.image_url ? 'v3' : 
+              slidesData ? 'v2' : 'v1',
       debug: {
         requestId,
         numSlides,
-        musicUrl: musicUrl.substring(0, 50) + '...'
+        musicUrl: musicUrl.substring(0, 50) + '...',
+        hasImageUrl: !!slidesData?.[0]?.image_url
       }
     });
     
