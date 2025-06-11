@@ -115,11 +115,11 @@ const createClips = async (slides, requestId, jobId) => {
     
     clips.push({
       index: i,
-      text: slides[i].text,
+      text: slides[i].text || 'No text available', // Extract text from JSON
       duration: duration
     });
     
-    logToJob(jobId, `Clip ${i}: ${duration.toFixed(2)}s`);
+    logToJob(jobId, `Clip ${i}: ${duration.toFixed(2)}s - "${slides[i].text ? slides[i].text.substring(0, 30) : 'No text'}..."`);
   }
   
   return clips;
@@ -133,6 +133,15 @@ const addTextToImages = async (clips, requestId, jobId) => {
     const clip = clips[i];
     const inputPath = path.join('media', requestId, `${i}.jpg`);
     const outputPath = path.join('media', requestId, `${i}_with_text.jpg`);
+    
+    // Debug: Check if text exists
+    if (!clip.text || clip.text.trim() === '') {
+      logToJob(jobId, `WARNING: No text found for clip ${i}, using image without text`);
+      await fs.copyFile(inputPath, outputPath);
+      continue;
+    }
+    
+    logToJob(jobId, `Processing text for image ${i}: "${clip.text.substring(0, 50)}..."`);
     
     // Split text into lines (max 40 chars per line for horizontal video)
     const words = clip.text.split(' ');
@@ -151,6 +160,7 @@ const addTextToImages = async (clips, requestId, jobId) => {
     
     // Limit to 3 lines max
     const displayLines = lines.slice(0, 3);
+    logToJob(jobId, `Split into ${displayLines.length} lines for image ${i}`);
     
     // Clean each line for FFmpeg
     const cleanLines = displayLines.map(line => 
@@ -189,9 +199,9 @@ const addTextToImages = async (clips, requestId, jobId) => {
     
     try {
       await runFFmpeg(args, `Adding animated text to image ${i}`);
-      logToJob(jobId, `Added animated text overlay to image ${i}`);
+      logToJob(jobId, `Successfully added animated text overlay to image ${i}`);
     } catch (error) {
-      logToJob(jobId, `Warning: Failed to add text to image ${i}, using image without text`);
+      logToJob(jobId, `Warning: Failed to add text to image ${i}: ${error.message}`);
       await fs.copyFile(inputPath, outputPath);
     }
   }
@@ -377,6 +387,8 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
       const jsonContent = await fs.readFile(jsonPath, 'utf8');
       const slideMetadata = JSON.parse(jsonContent);
       allSlides.push(slideMetadata);
+      
+      logToJob(jobId, `Slide ${i} text: "${slideMetadata.text.substring(0, 50)}..."`);
       
       // Download audio
       const audioPath = path.join(mediaDir, `${i}.mp3`);
