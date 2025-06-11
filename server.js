@@ -537,13 +537,13 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
     const musicSize = await downloadFile(musicUrl, musicPath);
     logToJob(jobId, `Downloaded music.mp3 (${musicSize} bytes)`);
     
-    // Download slides
+    // Download slides using new structure (images/, audio/, text/ folders)
     const allSlides = [];
     for (let i = 0; i < numSlides; i++) {
       const slideData = {
-        imageUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/${i}.jpg`,
-        jsonUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/${i}.json`,
-        audioUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/${i}.mp3`
+        imageUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/images/${i}.jpg`,
+        jsonUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/text/${i}.json`,
+        audioUrl: `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/audio/${i}.mp3`
       };
       
       // Download image
@@ -686,7 +686,14 @@ app.post('/register-job', async (req, res) => {
       console.log('Processing object format...');
       requestId = req.body.requestId;
       numSlides = req.body.numSlides;
-      musicUrl = req.body.musicUrl;
+      
+      // Fix music URL for new folder structure
+      if (req.body.musicUrl) {
+        musicUrl = req.body.musicUrl;
+      } else {
+        // Construct music URL with new structure
+        musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/audio/music.mp3`;
+      }
     } else {
       console.log('Invalid format detected');
       return res.status(400).json({ 
