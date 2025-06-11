@@ -267,7 +267,7 @@ const createMasterAudio = async (clips, requestId, jobId) => {
 
 // Create horizontal video from images
 const createVideoFromImages = async (clips, requestId, jobId) => {
-  logToJob(jobId, `Creating horizontal video from images`);
+  logToJob(jobId, `Creating horizontal video from images WITH TEXT`);
   
   const mediaDir = path.join('media', requestId);
   const videoPath = path.join(mediaDir, 'video_only.mp4');
@@ -275,14 +275,29 @@ const createVideoFromImages = async (clips, requestId, jobId) => {
   // Calculate total duration
   const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
   
+  // Verify that all images with text exist
+  for (let i = 0; i < clips.length; i++) {
+    const textImagePath = path.join(mediaDir, `${i}_with_text.jpg`);
+    try {
+      await fs.access(textImagePath);
+      logToJob(jobId, `✅ Image with text ${i}_with_text.jpg exists`);
+    } catch (error) {
+      logToJob(jobId, `❌ Missing ${i}_with_text.jpg, copying original`);
+      const originalPath = path.join(mediaDir, `${i}.jpg`);
+      await fs.copyFile(originalPath, textImagePath);
+    }
+  }
+  
   // Create input list for concat demuxer with precise timing
   const listPath = path.join(mediaDir, 'video_list.txt');
   const listContent = clips.map((clip, i) => {
+    // ВАЖНО: используем изображения С ТЕКСТОМ (_with_text.jpg)
     return `file '${i}_with_text.jpg'\nduration ${clip.duration}`;
   }).join('\n') + '\n' + `file '${clips.length - 1}_with_text.jpg'`; // Last frame
   
   await fs.writeFile(listPath, listContent);
-  logToJob(jobId, `Created video list with ${clips.length} clips, total: ${totalDuration}s`);
+  logToJob(jobId, `Created video list using images WITH TEXT`);
+  logToJob(jobId, `Video list content: ${listContent.replace(/\n/g, ' | ')}`);
   
   // Create horizontal video (16:9 aspect ratio, 1920x1080)
   const args = [
@@ -297,8 +312,8 @@ const createVideoFromImages = async (clips, requestId, jobId) => {
     '-y', videoPath
   ];
   
-  await runFFmpeg(args, 'Creating horizontal video from images');
-  logToJob(jobId, `Horizontal video created (1920x1080)`);
+  await runFFmpeg(args, 'Creating horizontal video from images WITH TEXT');
+  logToJob(jobId, `Horizontal video created (1920x1080) using images with text overlays`);
   
   return videoPath;
 };
