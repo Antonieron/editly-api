@@ -329,7 +329,104 @@ const cleanupFiles = async (requestId, jobId) => {
   }
 };
 
-// Main video processing function
+// New video processing function for updated N8N format
+const processVideoJobV2 = async (requestId, numSlides, musicUrl, supabaseData, jobId) => {
+  try {
+    logToJob(jobId, `Job started for request ${requestId} with ${numSlides} slides (new format)`);
+    
+    // Create directories
+    const mediaDir = path.join('media', requestId);
+    await fs.mkdir(mediaDir, { recursive: true });
+    logToJob(jobId, `Directories created`);
+    
+    // Download music
+    const musicPath = path.join(mediaDir, 'music.mp3');
+    const musicSize = await downloadFile(musicUrl, musicPath);
+    logToJob(jobId, `Downloaded music.mp3 (${musicSize} bytes)`);
+    
+    // Download slides using new structure
+    const allSlides = [];
+    for (let i = 0; i < numSlides; i++) {
+      const slideInfo = supabaseData[i];
+      const baseUrl = 'https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/';
+      
+      const slideData = {
+        imageUrl: `${baseUrl}${slideInfo.image}`,
+        jsonUrl: `${baseUrl}${slideInfo.text}`,
+        audioUrl: `${baseUrl}${slideInfo.audio}`
+      };
+      
+      // Download image
+      const imagePath = path.join(mediaDir, `${i}.jpg`);
+      const imageSize = await downloadFile(slideData.imageUrl, imagePath);
+      logToJob(jobId, `Downloaded ${i}.jpg (${imageSize} bytes)`);
+      
+      // Download JSON metadata
+      const jsonPath = path.join(mediaDir, `${i}.json`);
+      const jsonSize = await downloadFile(slideData.jsonUrl, jsonPath);
+      logToJob(jobId, `Downloaded ${i}.json (${jsonSize} bytes)`);
+      
+      // Parse JSON
+      const jsonContent = await fs.readFile(jsonPath, 'utf8');
+      const slideMetadata = JSON.parse(jsonContent);
+      allSlides.push(slideMetadata);
+      
+      // Download audio
+      const audioPath = path.join(mediaDir, `${i}.mp3`);
+      const audioSize = await downloadFile(slideData.audioUrl, audioPath);
+      logToJob(jobId, `Downloaded ${i}.mp3 (${audioSize} bytes)`);
+      
+      // Convert to WAV
+      const wavPath = path.join(mediaDir, `${i}.wav`);
+      await convertToWav(audioPath, wavPath);
+      logToJob(jobId, `Converted audio ${i} to WAV`);
+    }
+    
+    logToJob(jobId, `Media download completed`);
+    
+    // Create clips with accurate duration
+    const clips = await createClips(allSlides, requestId, jobId);
+    
+    // Add text overlays to images
+    await addTextToImages(clips, requestId, jobId);
+    
+    // Create master audio track
+    const audioPath = await createMasterAudio(clips, requestId, jobId);
+    
+    // Create video directly from images (FAST!)
+    const videoPath = await createVideoFromImages(clips, requestId, jobId);
+    
+    // Merge video with audio
+    const finalVideoPath = await mergeVideoWithAudio(videoPath, audioPath, requestId, jobId);
+    
+    // Upload to Supabase
+    const videoUrl = await uploadVideoToSupabase(finalVideoPath, requestId, jobId);
+    
+    // Update job status
+    const job = jobs.get(jobId);
+    job.status = 'completed';
+    job.result = { videoUrl };
+    job.completedAt = new Date().toISOString();
+    
+    logToJob(jobId, `Job completed successfully! Video URL: ${videoUrl}`);
+    
+    // Cleanup
+    await cleanupFiles(requestId, jobId);
+    
+  } catch (error) {
+    logToJob(jobId, `ERROR: Job failed: ${error.message}`);
+    
+    const job = jobs.get(jobId);
+    job.status = 'failed';
+    job.error = error.message;
+    job.completedAt = new Date().toISOString();
+    
+    // Cleanup on error
+    await cleanupFiles(requestId, jobId);
+  }
+};
+
+// Main video processing function (original format - kept for backward compatibility)
 const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
   try {
     logToJob(jobId, `Job started for request ${requestId} with ${numSlides} slides`);
@@ -426,11 +523,33 @@ const processVideoJob = async (requestId, numSlides, musicUrl, jobId) => {
 // Routes
 app.post('/register-job', async (req, res) => {
   try {
-    const { requestId, numSlides, musicUrl } = req.body;
+    console.log('Received request body:', JSON.stringify(req.body, null, 2));
+    
+    // Handle both old and new N8N formats
+    let requestId, numSlides, musicUrl, supabaseData;
+    
+    if (Array.isArray(req.body) && req.body.length > 0) {
+      // New N8N format (array)
+      const data = req.body[0];
+      requestId = data.requestId;
+      numSlides = data.numSlides;
+      musicUrl = `${data.supabaseBaseUrl}${data.music}`;
+      supabaseData = data.supabaseData;
+    } else {
+      // Old format (direct object)
+      requestId = req.body.requestId;
+      numSlides = req.body.numSlides;
+      musicUrl = req.body.musicUrl;
+    }
+    
+    console.log('Extracted values:', { requestId, numSlides, musicUrl });
     
     if (!requestId || !numSlides || !musicUrl) {
+      console.log('Missing fields detected');
       return res.status(400).json({ 
-        error: 'Missing required fields: requestId, numSlides, musicUrl' 
+        error: 'Missing required fields: requestId, numSlides, musicUrl',
+        received: { requestId: !!requestId, numSlides: !!numSlides, musicUrl: !!musicUrl },
+        body: req.body
       });
     }
     
@@ -445,7 +564,13 @@ app.post('/register-job', async (req, res) => {
     });
     
     // Start processing asynchronously
-    processVideoJob(requestId, numSlides, musicUrl, jobId);
+    if (supabaseData) {
+      // New format with explicit file paths
+      processVideoJobV2(requestId, numSlides, musicUrl, supabaseData, jobId);
+    } else {
+      // Old format (fallback)
+      processVideoJob(requestId, numSlides, musicUrl, jobId);
+    }
     
     res.json({ 
       success: true, 
@@ -454,6 +579,7 @@ app.post('/register-job', async (req, res) => {
     });
     
   } catch (error) {
+    console.error('Error in /register-job:', error);
     res.status(500).json({ error: error.message });
   }
 });
