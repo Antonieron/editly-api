@@ -172,16 +172,17 @@ const addTextToImages = async (clips, requestId, jobId) => {
           .replace(/,/g, '\\,')
     );
     
-    // Create animated text filters for each line
+    // Create animated text filters for each line (simplified animation)
     const textFilters = cleanLines.map((line, lineIndex) => {
       const yPosition = 100 + (lineIndex * 50); // Stack lines vertically
-      const animationDelay = lineIndex * 0.5; // Stagger animation
+      const animationDelay = lineIndex * 0.8; // Stagger animation
       
+      // Simplified slide-in animation from left
       return `drawtext=text='${line}':` +
              `fontsize=32:fontcolor=white:` +
-             `x='if(lt(t,${animationDelay}), -w, if(lt(t,${animationDelay + 2}), (t-${animationDelay})*w/2, w*0.05))':` +
+             `x='if(lt(t,${animationDelay}), -200, if(lt(t,${animationDelay + 1.5}), -200+(t-${animationDelay})*200, 50))':` +
              `y=${yPosition}:` +
-             `shadowcolor=black:shadowx=3:shadowy=3:shadowblur=2`;
+             `shadowcolor=black:shadowx=2:shadowy=2`;
     });
     
     // Add semi-transparent background for better readability
@@ -201,8 +202,23 @@ const addTextToImages = async (clips, requestId, jobId) => {
       await runFFmpeg(args, `Adding animated text to image ${i}`);
       logToJob(jobId, `Successfully added animated text overlay to image ${i}`);
     } catch (error) {
-      logToJob(jobId, `Warning: Failed to add text to image ${i}: ${error.message}`);
-      await fs.copyFile(inputPath, outputPath);
+      logToJob(jobId, `Animation failed, trying simple text for image ${i}`);
+      
+      // Fallback: simple static text without animation
+      const simpleText = cleanLines.join(' ').substring(0, 100);
+      const simpleArgs = [
+        '-i', inputPath,
+        '-vf', `drawtext=text='${simpleText}':fontsize=28:fontcolor=white:x=50:y=50:shadowcolor=black:shadowx=2:shadowy=2`,
+        '-y', outputPath
+      ];
+      
+      try {
+        await runFFmpeg(simpleArgs, `Adding simple text to image ${i}`);
+        logToJob(jobId, `Added simple text overlay to image ${i}`);
+      } catch (simpleError) {
+        logToJob(jobId, `All text methods failed for image ${i}, using image without text`);
+        await fs.copyFile(inputPath, outputPath);
+      }
     }
   }
 };
