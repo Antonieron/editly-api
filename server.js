@@ -125,104 +125,157 @@ const createClips = async (slides, requestId, jobId) => {
   return clips;
 };
 
-// Add text to images with better text handling
+// Add text to images with multi-line animated text
 const addTextToImages = async (clips, requestId, jobId) => {
-  logToJob(jobId, `Adding text overlays to images`);
+  logToJob(jobId, `Adding animated multi-line text overlays`);
   
   for (let i = 0; i < clips.length; i++) {
     const clip = clips[i];
     const inputPath = path.join('media', requestId, `${i}.jpg`);
     const outputPath = path.join('media', requestId, `${i}_with_text.jpg`);
     
-    // Clean text for FFmpeg - remove problematic characters
-    let displayText = clip.text.length > 150 ? 
-      clip.text.substring(0, 147) + '...' : clip.text;
+    // Split text into lines (max 40 chars per line for horizontal video)
+    const words = clip.text.split(' ');
+    const lines = [];
+    let currentLine = '';
     
-    // Escape special characters for FFmpeg
-    displayText = displayText
-      .replace(/'/g, "\\'")      // Escape single quotes
-      .replace(/"/g, '\\"')      // Escape double quotes
-      .replace(/\n/g, ' ')       // Replace newlines with spaces
-      .replace(/\r/g, ' ')       // Replace carriage returns
-      .replace(/:/g, '\\:')      // Escape colons
-      .replace(/\[/g, '\\[')     // Escape square brackets
-      .replace(/\]/g, '\\]');
+    for (const word of words) {
+      if ((currentLine + ' ' + word).length <= 40) {
+        currentLine += (currentLine ? ' ' : '') + word;
+      } else {
+        if (currentLine) lines.push(currentLine);
+        currentLine = word;
+      }
+    }
+    if (currentLine) lines.push(currentLine);
     
-    logToJob(jobId, `Processing text for image ${i}: "${displayText.substring(0, 50)}..."`);
+    // Limit to 3 lines max
+    const displayLines = lines.slice(0, 3);
+    
+    // Clean each line for FFmpeg
+    const cleanLines = displayLines.map(line => 
+      line.replace(/'/g, "\\'")
+          .replace(/"/g, '\\"')
+          .replace(/:/g, '\\:')
+          .replace(/\[/g, '\\[')
+          .replace(/\]/g, '\\]')
+          .replace(/,/g, '\\,')
+    );
+    
+    // Create animated text filters for each line
+    const textFilters = cleanLines.map((line, lineIndex) => {
+      const yPosition = 100 + (lineIndex * 50); // Stack lines vertically
+      const animationDelay = lineIndex * 0.5; // Stagger animation
+      
+      return `drawtext=text='${line}':` +
+             `fontsize=32:fontcolor=white:` +
+             `x='if(lt(t,${animationDelay}), -w, if(lt(t,${animationDelay + 2}), (t-${animationDelay})*w/2, w*0.05))':` +
+             `y=${yPosition}:` +
+             `shadowcolor=black:shadowx=3:shadowy=3:shadowblur=2`;
+    });
+    
+    // Add semi-transparent background for better readability
+    const backgroundFilter = `drawbox=x=0:y=80:w=iw:h=${displayLines.length * 50 + 40}:color=black@0.6`;
+    
+    const filterString = [backgroundFilter, ...textFilters].join(',');
+    
+    logToJob(jobId, `Adding ${displayLines.length} animated text lines to image ${i}`);
     
     const args = [
       '-i', inputPath,
-      '-vf', `drawtext=text='${displayText}':fontsize=32:fontcolor=white:x=50:y=50:shadowcolor=black:shadowx=2:shadowy=2`,
+      '-vf', filterString,
       '-y', outputPath
     ];
     
     try {
-      await runFFmpeg(args, `Adding text to image ${i}`);
-      logToJob(jobId, `Added text overlay to image ${i}`);
+      await runFFmpeg(args, `Adding animated text to image ${i}`);
+      logToJob(jobId, `Added animated text overlay to image ${i}`);
     } catch (error) {
       logToJob(jobId, `Warning: Failed to add text to image ${i}, using image without text`);
-      // Copy original image if text overlay fails
       await fs.copyFile(inputPath, outputPath);
     }
   }
 };
 
-// Create master audio track
+// Create master audio track with background music
 const createMasterAudio = async (clips, requestId, jobId) => {
-  logToJob(jobId, `Creating master audio track`);
+  logToJob(jobId, `Creating master audio track with background music`);
   
   const mediaDir = path.join('media', requestId);
+  const musicPath = path.join(mediaDir, 'music.mp3');
   const masterAudioPath = path.join(mediaDir, 'master_audio.wav');
   
-  const inputs = [];
-  const filters = [];
+  // Calculate total duration
+  const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
+  logToJob(jobId, `Total video duration: ${totalDuration}s`);
+  
+  // First, concatenate all speech audio
+  const speechInputs = [];
+  const speechFilters = [];
   
   for (let i = 0; i < clips.length; i++) {
-    inputs.push('-i', path.join(mediaDir, `${i}.wav`));
-    filters.push(`[${i}:a]`);
+    speechInputs.push('-i', path.join(mediaDir, `${i}.wav`));
+    speechFilters.push(`[${i + 1}:a]`); // +1 because music is input 0
   }
   
-  const concatFilter = filters.join('') + `concat=n=${clips.length}:v=0:a=1[out]`;
+  const speechConcat = speechFilters.join('') + `concat=n=${clips.length}:v=0:a=1[speech]`;
+  
+  // Mix speech with background music
+  // Music at 15% volume, looped to match duration
+  // Speech at 100% volume on top
+  const mixFilter = `[0:a]volume=0.15,aloop=loop=-1:size=2e+09,atrim=duration=${totalDuration}[bg];[speech][bg]amix=inputs=2:duration=shortest:dropout_transition=2[out]`;
   
   const args = [
-    ...inputs,
-    '-filter_complex', concatFilter,
+    '-i', musicPath,          // Input 0: background music
+    ...speechInputs,          // Input 1+: speech files
+    '-filter_complex', `${speechConcat};${mixFilter}`,
     '-map', '[out]',
+    '-t', totalDuration.toString(),
+    '-ar', '44100',
+    '-ac', '2',
     '-y', masterAudioPath
   ];
   
-  await runFFmpeg(args, 'Creating master audio');
-  logToJob(jobId, `Master audio created`);
+  await runFFmpeg(args, 'Creating master audio with background music');
+  logToJob(jobId, `Master audio created with background music mixed`);
   
   return masterAudioPath;
 };
 
-// Create video from images
+// Create horizontal video from images
 const createVideoFromImages = async (clips, requestId, jobId) => {
-  logToJob(jobId, `Creating video from images`);
+  logToJob(jobId, `Creating horizontal video from images`);
   
   const mediaDir = path.join('media', requestId);
   const videoPath = path.join(mediaDir, 'video_only.mp4');
   
   // Calculate total duration
   const totalDuration = clips.reduce((sum, clip) => sum + clip.duration, 0);
-  const fps = clips.length / totalDuration;
   
-  logToJob(jobId, `Using FPS: ${fps.toFixed(2)} for ${totalDuration}s duration`);
+  // Create input list for concat demuxer with precise timing
+  const listPath = path.join(mediaDir, 'video_list.txt');
+  const listContent = clips.map((clip, i) => {
+    return `file '${i}_with_text.jpg'\nduration ${clip.duration}`;
+  }).join('\n') + '\n' + `file '${clips.length - 1}_with_text.jpg'`; // Last frame
   
+  await fs.writeFile(listPath, listContent);
+  logToJob(jobId, `Created video list with ${clips.length} clips, total: ${totalDuration}s`);
+  
+  // Create horizontal video (16:9 aspect ratio, 1920x1080)
   const args = [
-    '-framerate', fps.toString(),
-    '-i', path.join(mediaDir, '%d_with_text.jpg'),
-    '-vf', 'scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2',
+    '-f', 'concat',
+    '-safe', '0',
+    '-i', listPath,
+    '-vf', 'scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,fps=30',
     '-c:v', 'libx264',
     '-preset', 'fast',
     '-crf', '23',
-    '-t', totalDuration.toString(),
+    '-pix_fmt', 'yuv420p',
     '-y', videoPath
   ];
   
-  await runFFmpeg(args, 'Creating video from images');
-  logToJob(jobId, `Video created`);
+  await runFFmpeg(args, 'Creating horizontal video from images');
+  logToJob(jobId, `Horizontal video created (1920x1080)`);
   
   return videoPath;
 };
