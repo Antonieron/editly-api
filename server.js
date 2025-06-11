@@ -125,7 +125,25 @@ const createClips = async (slides, requestId, jobId) => {
   return clips;
 };
 
-// Add text to images with multi-line animated text
+// Check FFmpeg capabilities
+const checkFFmpegCapabilities = async (jobId) => {
+  logToJob(jobId, `🔍 Checking FFmpeg capabilities...`);
+  
+  try {
+    // Check if drawtext filter is available
+    const { stdout } = await execPromise('ffmpeg -hide_banner -filters 2>/dev/null | grep drawtext || echo "NO_DRAWTEXT"');
+    logToJob(jobId, `FFmpeg drawtext support: ${stdout.trim()}`);
+    
+    // Check FFmpeg version and build info
+    const { stdout: version } = await execPromise('ffmpeg -version 2>/dev/null | head -3');
+    logToJob(jobId, `FFmpeg version info: ${version.replace(/\n/g, ' | ')}`);
+    
+    return stdout.includes('drawtext');
+  } catch (error) {
+    logToJob(jobId, `FFmpeg check failed: ${error.message}`);
+    return false;
+  }
+};
 const addTextToImages = async (clips, requestId, jobId) => {
   logToJob(jobId, `Adding animated multi-line text overlays`);
   
