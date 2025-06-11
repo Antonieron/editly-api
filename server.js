@@ -762,6 +762,62 @@ app.post('/register-job', async (req, res) => {
   }
 });
 
+// Test endpoint with correct image paths
+app.post('/test-job', async (req, res) => {
+  try {
+    const requestId = "85dca25d-fc8a-45df-81d2-7698b0364ea1";
+    const testSlides = [
+      {
+        id: "test-1",
+        request_id: requestId,
+        block_index: 0,
+        rewritten_text: "Test slide 1",
+        image_url: "https://im.runware.ai/image/ws/2/ii/0bb20ac7-4f62-4a5b-8499-c90f883db55e.jpg",
+        audio_url: `media/${requestId}/audio/0.mp3`
+      },
+      {
+        id: "test-2", 
+        request_id: requestId,
+        block_index: 1,
+        rewritten_text: "Test slide 2",
+        image_url: "https://im.runware.ai/image/ws/2/ii/1de63df6-604b-417d-a9b6-d5fcc4df3be5.jpg",
+        audio_url: `media/${requestId}/audio/1.mp3`
+      },
+      {
+        id: "test-3",
+        request_id: requestId, 
+        block_index: 2,
+        rewritten_text: "Test slide 3",
+        image_url: "https://im.runware.ai/image/ws/2/ii/ea759e72-a454-4955-8cd7-c92c14c8c563.jpg",
+        audio_url: `media/${requestId}/audio/2.mp3`
+      }
+    ];
+    
+    const jobId = uuidv4().slice(0, 8);
+    const musicUrl = `https://qpwsccpzxohrtvjrrncq.supabase.co/storage/v1/object/public/media/${requestId}/audio/music.mp3`;
+    
+    jobs.set(jobId, {
+      id: jobId,
+      requestId,
+      status: 'processing',
+      createdAt: new Date().toISOString(),
+      logs: []
+    });
+    
+    // Force V3 processing
+    processVideoJobV3(requestId, testSlides.length, musicUrl, testSlides, jobId);
+    
+    res.json({ 
+      success: true, 
+      jobId,
+      message: 'Test job started with correct V3 format'
+    });
+    
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Test endpoint for debugging
 app.post('/test-data', (req, res) => {
   console.log('=== TEST ENDPOINT ===');
