@@ -319,6 +319,55 @@ const buildClips = async (requestId, numSlides, jobId) => {
   return clips;
 };
 
+// HTML template with base64 embedded image
+const compileSceneHtmlWithBase64 = (imageBase64, imageMimeType, text, fontSize) => {
+  const escapedText = text.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const textLines = getTextLines(escapedText);
+  
+  return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background: #000; 
+            width: 1280px; 
+            height: 720px;
+            font-family: 'Arial', sans-serif;
+        }
+        img { 
+            width: 100%; 
+            height: 100%; 
+            object-fit: cover; 
+            display: block;
+        }
+        .text-overlay { 
+            position: absolute; 
+            bottom: 8%; 
+            left: 5%;
+            right: 5%;
+            text-align: center; 
+            color: #fff; 
+            font-size: ${fontSize}; 
+            font-weight: bold;
+            text-shadow: 2px 2px 8px rgba(0,0,0,0.8);
+            background: rgba(0,0,0,0.3);
+            padding: 20px;
+            border-radius: 10px;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <img src="data:${imageMimeType};base64,${imageBase64}" alt="Slide image">
+    ${text ? `<div class="text-overlay">${textLines.join('<br>')}</div>` : ''}
+</body>
+</html>`;
+};
+
 // Improved HTML template with better styling
 const compileSceneHtml = (imagePath, text, fontSize) => {
   const escapedText = text.replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -368,7 +417,7 @@ const compileSceneHtml = (imagePath, text, fontSize) => {
 </html>`;
 };
 
-// Improved video rendering with proper frame counting
+// Improved video rendering with HTML content instead of file URLs
 const renderVideo = async (requestId, clips, jobId) => {
   const width = 1280;
   const height = 720;
@@ -394,13 +443,15 @@ const renderVideo = async (requestId, clips, jobId) => {
       
       logToJob(jobId, `Rendering clip ${clipIndex + 1}/${clips.length}: ${framesForThisClip} frames (${clip.duration}s)`);
       
-      // Create HTML for this clip
-      const html = compileSceneHtml(clip.imagePath, clip.text, clip.fontSize);
-      const tempHtmlPath = path.join(framesDir, `scene-${clipIndex}.html`);
-      await fs.writeFile(tempHtmlPath, html);
+      // Read image as base64 and create HTML with embedded image
+      const imageBuffer = await fs.readFile(clip.imagePath);
+      const imageBase64 = imageBuffer.toString('base64');
+      const imageMimeType = 'image/jpeg'; // assuming all images are JPG
       
-      // Navigate to the scene
-      await page.goto(`file://${tempHtmlPath}`, { waitUntil: 'networkidle0' });
+      const html = compileSceneHtmlWithBase64(imageBase64, imageMimeType, clip.text, clip.fontSize);
+      
+      // Set HTML content directly instead of using file:// URL
+      await page.setContent(html, { waitUntil: 'networkidle0' });
       
       // Render frames for this clip
       for (let frameInClip = 0; frameInClip < framesForThisClip; frameInClip++) {
@@ -412,11 +463,6 @@ const renderVideo = async (requestId, clips, jobId) => {
         });
         totalFrameCount++;
       }
-      
-      // Clean up temp HTML
-      try {
-        await fs.unlink(tempHtmlPath);
-      } catch {} // Ignore cleanup errors
     }
     
     logToJob(jobId, `Rendered ${totalFrameCount} total frames`);
